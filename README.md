@@ -3,6 +3,7 @@
 System Stats is an Omarchy Quattro plugin that puts one compact, shared CPU metric in every screen's bar. A session-wide service owns one long-lived native helper, so adding a screen does not add another sampler or timer.
 
 This first vertical slice intentionally shows CPU only. RAM and GPU are unavailable in the published snapshot and stay hidden in the bar rather than appearing as invented zero values.
+Their transitional `dependencyMissing` state is intentionally limited to this CPU-only slice.
 
 ## Install
 
@@ -27,7 +28,7 @@ make build
 make test
 ```
 
-Tests exercise CPU behavior through the public `SystemStatsSession` state exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. The widget smoke test instantiates two callers against one service and verifies that only one helper and scheduler exist.
+Tests exercise CPU behavior through the public `SystemStatsSession.current` state exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. The widget smoke test instantiates two callers against one service, then inspects the live process tree to verify that only one single-threaded helper and scheduler exist.
 
 ## License
 

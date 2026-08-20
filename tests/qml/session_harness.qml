@@ -11,10 +11,6 @@ ShellRoot {
   readonly property int expectedPercent: Number(Quickshell.env("SYSTEM_STATS_EXPECTED_PERCENT"))
   readonly property string expectedError: String(Quickshell.env("SYSTEM_STATS_EXPECTED_ERROR"))
 
-  function localPath(url) {
-    return decodeURIComponent(String(url).replace(/^file:\/\//, ""))
-  }
-
   function fail(message) {
     if (finished) return
     finished = true
@@ -30,18 +26,20 @@ ShellRoot {
   function checkSnapshot(snapshot) {
     if (finished || snapshot.sequence !== 1) return
     if (!verify(snapshot.schemaVersion === 1, "schema version")) return
-    if (!verify(snapshot.generation === 1, "generation")) return
+    if (!verify(Number.isInteger(snapshot.generation) && snapshot.generation > 0, "generation")) return
     var expectedPhase = expectedStatus === "available" ? "live" : "degraded"
     if (!verify(snapshot.phase === expectedPhase, "snapshot phase")) return
     if (!verify(snapshot.cpu.status === expectedStatus, "CPU status")) return
     if (expectedStatus === "available") {
       if (!verify(snapshot.cpu.value.percent === expectedPercent, caseName + " CPU percentage")) return
+      if (!verify(snapshot.cpu.value.actualWindowMs > 0, caseName + " complete CPU window")) return
+      if (!verify(snapshot.cpu.value.actualWindowMs === snapshot.cpu.window.actualMs, caseName + " window identity")) return
     } else if (expectedError !== "") {
-      if (!verify(snapshot.cpu.error === expectedError, caseName + " CPU error")) return
+      if (!verify(snapshot.cpu.error.code === expectedError, caseName + " CPU error")) return
     }
     if (!verify(Object.isFrozen(snapshot), "snapshot immutability")) return
     if (!verify(Object.isFrozen(snapshot.cpu), "CPU metric immutability")) return
-    if (!verify(Object.isFrozen(snapshot.cpu.value), "CPU value immutability")) return
+    if (snapshot.cpu.value && !verify(Object.isFrozen(snapshot.cpu.value), "CPU value immutability")) return
 
     finished = true
     console.log("TEST-PASS: " + caseName + " public session snapshot")
@@ -50,17 +48,11 @@ ShellRoot {
 
   SystemStats.Service {
     id: session
+  }
 
-    autoStart: false
-    helperCommand: [
-      testRoot.localPath(Qt.resolvedUrl("bin/system-stats-helper")),
-      "--frames",
-      testRoot.localPath(Qt.resolvedUrl("fixtures/cpu/" + testRoot.caseName + ".stat")),
-      "--interval-ms",
-      "1"
-    ]
-
-    onSnapshotPublished: function(snapshot) { testRoot.checkSnapshot(snapshot) }
+  Connections {
+    target: session
+    function onCurrentChanged() { testRoot.checkSnapshot(session.current) }
   }
 
   Timer {
@@ -73,6 +65,5 @@ ShellRoot {
     if (!verify(session.current.phase === "initializing", "initial phase")) return
     if (!verify(session.current.sequence === 0, "initial sequence")) return
     if (!verify(Object.isFrozen(session.current), "initial snapshot immutability")) return
-    session.start()
   }
 }

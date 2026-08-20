@@ -15,12 +15,16 @@ mkdir -p "$test_dir/plugin/bin" "$test_dir/fixtures" "$test_dir/Ui" "$test_dir/C
 cp "$repo_root/Service.qml" "$test_dir/plugin/Service.qml"
 cp "$repo_root/BarWidget.qml" "$test_dir/plugin/BarWidget.qml"
 cp "$repo_root/tests/qml/widget_preview.qml" "$test_dir/shell.qml"
+cp "$repo_root/tests/qml/FakeBar.qml" "$test_dir/FakeBar.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/plugin/bin/system-stats-helper"
 cp -R "$repo_root/tests/fixtures/cpu" "$test_dir/fixtures/cpu"
 cp -R /usr/share/omarchy/shell/Ui/. "$test_dir/Ui/"
 cp -R /usr/share/omarchy/shell/Commons/. "$test_dir/Commons/"
 
 SYSTEM_STATS_REVIEW_DIR="$review_dir" \
+  SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/normal.stat" \
+  SYSTEM_STATS_INTERVAL_MS=250 \
+  QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml"
 
 magick "$review_dir/system-stats-initializing.png" -resize 720x144\! "$review_dir/system-stats-initializing.png"

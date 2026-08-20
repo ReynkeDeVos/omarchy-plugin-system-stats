@@ -15,7 +15,14 @@
 enum { CPU_FIELD_COUNT = 8 };
 
 typedef struct {
-  uint64_t fields[CPU_FIELD_COUNT];
+  uint64_t user;
+  uint64_t nice;
+  uint64_t system;
+  uint64_t idle;
+  uint64_t iowait;
+  uint64_t irq;
+  uint64_t softirq;
+  uint64_t steal;
 } CpuCounters;
 
 typedef struct {
@@ -23,7 +30,12 @@ typedef struct {
   long interval_ms;
 } Options;
 
-typedef enum { PARSE_OK, PARSE_MISSING_FIELD, PARSE_MALFORMED } ParseResult;
+typedef enum {
+  PARSE_OK,
+  PARSE_MISSING_FIELD,
+  PARSE_MALFORMED,
+  PARSE_SOURCE_UNREADABLE
+} ParseResult;
 
 static void fail(const char *message) {
   fprintf(stderr, "system-stats-helper: %s\n", message);
@@ -31,7 +43,23 @@ static void fail(const char *message) {
 }
 
 static Options parse_options(int argc, char **argv) {
-  Options options = {.frames_path = NULL, .interval_ms = 2000};
+  const char *frames_path = getenv("SYSTEM_STATS_FRAMES");
+  const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
+  Options options = {
+      .frames_path =
+          frames_path != NULL && *frames_path != '\0' ? frames_path : NULL,
+      .interval_ms = 2000,
+  };
+
+  if (interval_text != NULL && *interval_text != '\0') {
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(interval_text, &end, 10);
+    if (errno != 0 || end == interval_text || *end != '\0' || value <= 0) {
+      fail("SYSTEM_STATS_INTERVAL_MS must be a positive integer");
+    }
+    options.interval_ms = value;
+  }
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
@@ -61,6 +89,11 @@ static ParseResult parse_cpu_line(char *line, CpuCounters *counters) {
   }
   cursor += 3;
 
+  uint64_t *fields[CPU_FIELD_COUNT] = {
+      &counters->user,   &counters->nice, &counters->system,  &counters->idle,
+      &counters->iowait, &counters->irq,  &counters->softirq, &counters->steal,
+  };
+
   for (size_t i = 0; i < CPU_FIELD_COUNT; i++) {
     while (isspace((unsigned char)*cursor))
       cursor++;
@@ -77,7 +110,7 @@ static ParseResult parse_cpu_line(char *line, CpuCounters *counters) {
     if (*end != '\0' && !isspace((unsigned char)*end))
       return PARSE_MALFORMED;
 
-    counters->fields[i] = (uint64_t)value;
+    *fields[i] = (uint64_t)value;
     cursor = end;
   }
 
@@ -89,14 +122,14 @@ static ParseResult read_counters(FILE *frames, CpuCounters *counters) {
   if (stream == NULL) {
     stream = fopen("/proc/stat", "re");
     if (stream == NULL)
-      return PARSE_MALFORMED;
+      return PARSE_SOURCE_UNREADABLE;
   }
 
   char *line = NULL;
   size_t capacity = 0;
   ssize_t length = getline(&line, &capacity, stream);
   ParseResult result =
-      length < 0 ? PARSE_MALFORMED : parse_cpu_line(line, counters);
+      length < 0 ? PARSE_SOURCE_UNREADABLE : parse_cpu_line(line, counters);
   free(line);
 
   if (frames == NULL)
@@ -136,27 +169,31 @@ static void sleep_until(struct timespec deadline) {
 }
 
 static const char *parse_error(ParseResult result) {
+  if (result == PARSE_SOURCE_UNREADABLE)
+    return "sourceUnreadable";
   return result == PARSE_MISSING_FIELD ? "missingRequiredField"
                                        : "malformedCounter";
 }
 
 static bool cpu_percent(const CpuCounters *before, const CpuCounters *after,
                         int *percent, const char **error) {
-  uint64_t delta[CPU_FIELD_COUNT];
-  for (size_t i = 0; i < CPU_FIELD_COUNT; i++) {
-    if (after->fields[i] < before->fields[i]) {
-      *error = "counterReset";
-      return false;
-    }
-    delta[i] = after->fields[i] - before->fields[i];
+  if (after->user < before->user || after->nice < before->nice ||
+      after->system < before->system || after->idle < before->idle ||
+      after->iowait < before->iowait || after->irq < before->irq ||
+      after->softirq < before->softirq || after->steal < before->steal) {
+    *error = "counterReset";
+    return false;
   }
 
   uint64_t active =
-      delta[0] + delta[1] + delta[2] + delta[5] + delta[6] + delta[7];
-  uint64_t inactive = delta[3] + delta[4];
+      (after->user - before->user) + (after->nice - before->nice) +
+      (after->system - before->system) + (after->irq - before->irq) +
+      (after->softirq - before->softirq) + (after->steal - before->steal);
+  uint64_t inactive =
+      (after->idle - before->idle) + (after->iowait - before->iowait);
   uint64_t total = active + inactive;
   if (total == 0) {
-    *error = "nonPositiveDelta";
+    *error = "malformedCounter";
     return false;
   }
 
@@ -165,14 +202,17 @@ static bool cpu_percent(const CpuCounters *before, const CpuCounters *after,
   return true;
 }
 
-static void emit_hello(void) {
-  printf("{\"type\":\"hello\",\"schemaVersion\":1,\"generation\":1}\n");
+static void emit_hello(uint64_t generation) {
+  printf("{\"type\":\"hello\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         "}\n",
+         generation);
   fflush(stdout);
 }
 
-static void emit_snapshot(uint64_t sequence, struct timespec sampled_at,
-                          int64_t window_ms, const CpuCounters *before,
-                          const CpuCounters *after, ParseResult current_result,
+static void emit_snapshot(uint64_t generation, uint64_t sequence,
+                          struct timespec sampled_at, int64_t window_ms,
+                          const CpuCounters *before, const CpuCounters *after,
+                          ParseResult current_result,
                           ParseResult previous_result) {
   int percent = 0;
   const char *error = NULL;
@@ -186,23 +226,32 @@ static void emit_snapshot(uint64_t sequence, struct timespec sampled_at,
     available = cpu_percent(before, after, &percent, &error);
   }
 
-  printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":1,"
-         "\"sequence\":%" PRIu64 ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64
+  int64_t sampled_at_ms = monotonic_ms(sampled_at);
+  printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         ",\"sequence\":%" PRIu64 ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64
          ",\"cpu\":",
-         sequence, available ? "live" : "degraded", monotonic_ms(sampled_at));
+         generation, sequence, available ? "live" : "degraded", sampled_at_ms);
   if (available) {
     printf("{\"status\":\"available\",\"value\":{\"percent\":%d,"
            "\"actualWindowMs\":%" PRId64 "},"
-           "\"sampledAtMs\":%" PRId64 ",\"path\":\"proc-stat\"}",
-           percent, window_ms, monotonic_ms(sampled_at));
+           "\"sampledAtMs\":%" PRId64 ",\"window\":{\"actualMs\":%" PRId64 "},"
+           "\"evidence\":\"hardwareConfirmed\",\"path\":\"proc-stat\"}",
+           percent, window_ms, sampled_at_ms, window_ms);
   } else {
-    printf("{\"status\":\"unavailable\",\"error\":\"%s\"}", error);
+    printf("{\"status\":\"unavailable\","
+           "\"error\":{\"code\":\"%s\",\"scope\":\"cpu\","
+           "\"retryability\":\"retryable\",\"pathId\":\"proc-stat\"},"
+           "\"since\":%" PRId64 "}",
+           error, sampled_at_ms);
   }
-  printf(",\"ram\":{\"status\":\"unavailable\",\"error\":\"notImplemented\"},"
-         "\"gpu\":{\"status\":\"unavailable\",\"error\":\"notImplemented\"},"
-         "\"source\":{\"status\":\"running\",\"helperPid\":%ld,\"timerCount\":"
-         "1}}\n",
-         (long)getpid());
+  printf(",\"ram\":{\"status\":\"unavailable\","
+         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
+         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"gpu\":{\"status\":\"unavailable\","
+         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
+         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"source\":{\"status\":\"running\"}}\n",
+         sampled_at_ms, sampled_at_ms);
   fflush(stdout);
 }
 
@@ -219,9 +268,10 @@ int main(int argc, char **argv) {
   if (clock_gettime(CLOCK_MONOTONIC, &previous_at) != 0)
     fail("could not read monotonic clock");
   struct timespec deadline = add_ms(previous_at, options.interval_ms);
+  uint64_t generation = (uint64_t)monotonic_ms(previous_at);
   uint64_t sequence = 0;
 
-  emit_hello();
+  emit_hello(generation);
 
   for (;;) {
     sleep_until(deadline);
@@ -237,7 +287,7 @@ int main(int argc, char **argv) {
         pause();
     }
 
-    emit_snapshot(++sequence, sampled_at,
+    emit_snapshot(generation, ++sequence, sampled_at,
                   monotonic_ms(sampled_at) - monotonic_ms(previous_at),
                   &previous, &current, current_result, previous_result);
 

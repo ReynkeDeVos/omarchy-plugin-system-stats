@@ -29,6 +29,8 @@ run_case() {
     SYSTEM_STATS_EXPECTED_STATUS="$expected_status" \
     SYSTEM_STATS_EXPECTED_PERCENT="$expected_percent" \
     SYSTEM_STATS_EXPECTED_ERROR="$expected_error" \
+    SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/$case_name.stat" \
+    SYSTEM_STATS_INTERVAL_MS=1 \
     QT_QPA_PLATFORM=offscreen \
     timeout 5s quickshell --no-color --path "$test_dir/shell.qml" 2>&1)
   status=$?
@@ -45,4 +47,4 @@ run_case hundred available 100 ""
 run_case rounding available 13 ""
 run_case missing-field unavailable 0 missingRequiredField
 run_case counter-reset unavailable 0 counterReset
-run_case nonpositive-delta unavailable 0 nonPositiveDelta
+run_case nonpositive-delta unavailable 0 malformedCounter

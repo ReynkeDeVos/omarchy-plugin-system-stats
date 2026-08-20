@@ -5,14 +5,9 @@ import Quickshell.Io
 Item {
   id: root
 
-  property bool autoStart: true
-  property var helperCommand: [helperPath()]
-
   readonly property var current: _current
-  readonly property int helperStartCount: _helperStartCount
-  readonly property var helperProcessId: collector.processId
 
-  property var _current: immutable({
+  property var _current: _immutable({
     schemaVersion: 1,
     generation: 0,
     sequence: 0,
@@ -20,33 +15,33 @@ Item {
     phase: "initializing",
     publishedAtMs: 0,
     cpu: { status: "initializing" },
-    ram: { status: "unavailable", error: "notImplemented" },
-    gpu: { status: "unavailable", error: "notImplemented" },
+    ram: {
+      status: "unavailable",
+      error: { code: "dependencyMissing", scope: "ram", retryability: "nonRetryable" },
+      since: 0
+    },
+    gpu: {
+      status: "unavailable",
+      error: { code: "dependencyMissing", scope: "gpu", retryability: "nonRetryable" },
+      since: 0
+    },
     source: { status: "starting" }
   })
-  property int _helperStartCount: 0
   property int _generation: 0
   property int _sequence: 0
 
-  signal snapshotPublished(var snapshot)
-
-  function helperPath() {
+  function _helperPath() {
     return decodeURIComponent(String(Qt.resolvedUrl("bin/system-stats-helper")).replace(/^file:\/\//, ""))
   }
 
-  function immutable(value) {
+  function _immutable(value) {
     if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value
     var keys = Object.keys(value)
-    for (var i = 0; i < keys.length; i++) immutable(value[keys[i]])
+    for (var i = 0; i < keys.length; i++) _immutable(value[keys[i]])
     return Object.freeze(value)
   }
 
-  function start() {
-    if (collector.running) return
-    collector.running = true
-  }
-
-  function handleLine(line) {
+  function _handleLine(line) {
     var message
     try {
       message = JSON.parse(String(line))
@@ -64,7 +59,12 @@ Item {
     if (message.type !== "snapshot") return
     if (message.generation !== _generation) return
     if (!Number.isInteger(message.sequence) || message.sequence <= _sequence) return
-    if (!validCpuMetric(message.cpu)) return
+    if (message.phase !== "live" && message.phase !== "degraded") return
+    if (!Number.isInteger(message.publishedAtMs) || message.publishedAtMs < 0) return
+    if (!_validMetric(message.cpu, true)) return
+    if (!_validMetric(message.ram, false) || !_validMetric(message.gpu, false)) return
+    if (!message.source || message.source.status !== "running") return
+    if ((message.phase === "live") !== (message.cpu.status === "available")) return
 
     var snapshot = {
       schemaVersion: message.schemaVersion,
@@ -79,31 +79,46 @@ Item {
       source: message.source
     }
     _sequence = message.sequence
-    _current = immutable(snapshot)
-    snapshotPublished(_current)
+    _current = _immutable(snapshot)
   }
 
-  function validCpuMetric(metric) {
+  function _validMetric(metric, allowsAvailable) {
     if (!metric || (metric.status !== "available" && metric.status !== "unavailable")) return false
-    if (metric.status === "unavailable") return typeof metric.error === "string"
-    if (!metric.value || !Number.isInteger(metric.value.percent)) return false
-    return metric.value.percent >= 0 && metric.value.percent <= 100
+    if (metric.status === "unavailable") {
+      return metric.error
+        && typeof metric.error.code === "string"
+        && typeof metric.error.scope === "string"
+        && typeof metric.error.retryability === "string"
+        && Number.isInteger(metric.since)
+        && metric.since >= 0
+    }
+    if (!allowsAvailable) return false
+    if (!metric.value
+        || !Number.isInteger(metric.value.percent)
+        || !Number.isInteger(metric.value.actualWindowMs)) return false
+    return metric.value.percent >= 0
+      && metric.value.percent <= 100
+      && metric.value.actualWindowMs > 0
+      && Number.isInteger(metric.sampledAtMs)
+      && metric.sampledAtMs >= 0
+      && metric.window
+      && Number.isInteger(metric.window.actualMs)
+      && metric.window.actualMs > 0
+      && metric.window.actualMs === metric.value.actualWindowMs
+      && typeof metric.evidence === "string"
+      && typeof metric.path === "string"
   }
 
   Process {
     id: collector
 
-    command: root.helperCommand
+    command: [root._helperPath()]
     stdinEnabled: true
 
     stdout: SplitParser {
-      onRead: function(line) { root.handleLine(line) }
+      onRead: function(line) { root._handleLine(line) }
     }
-
-    onStarted: root._helperStartCount++
   }
 
-  Component.onCompleted: {
-    if (autoStart) Qt.callLater(start)
-  }
+  Component.onCompleted: Qt.callLater(function() { collector.running = true })
 }
