@@ -100,7 +100,12 @@ if (( status != 0 )); then exit "$status"; fi
 grep -Fq "TEST-PASS: two widgets share one session" "$output_file"
 
 mapfile -t launch_events < <(awk '$1 == "launch" { print $2 }' "$trace_file")
-mapfile -t wait_processes < <(awk '$1 == "wait" { print $2 }' "$trace_file" | sort -u)
+mapfile -t sampler_events < <(awk '$1 == "sampler" { print $2 ":" $3 }' "$trace_file")
 [[ ${#launch_events[@]} -eq 1 ]]
-[[ ${#wait_processes[@]} -eq 1 ]]
-[[ ${wait_processes[0]} == "${launch_events[0]}" ]]
+[[ ${#sampler_events[@]} -eq 1 ]]
+[[ ${sampler_events[0]%%:*} == "${launch_events[0]}" ]]
+
+if rg -n '\b(Process|Timer)\s*\{' "$repo_root/BarWidget.qml"; then
+  echo "screen callers must remain pure readers without helpers or sampling timers" >&2
+  exit 1
+fi

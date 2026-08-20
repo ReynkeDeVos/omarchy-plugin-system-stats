@@ -22,6 +22,9 @@ ShellRoot {
 
   function checkWidgets(snapshot) {
     if (finished || ready || snapshot.sequence !== 1) return
+    if (!verify(fakeBarA !== fakeBarB, "screens have distinct bar callers")) return
+    if (!verify(screenA.bar === fakeBarA, "screen A owns bar A")) return
+    if (!verify(screenB.bar === fakeBarB, "screen B owns bar B")) return
     if (!verify(screenA.session === session, "screen A uses shared session")) return
     if (!verify(screenB.session === session, "screen B uses shared session")) return
     if (!verify(screenA.snapshotSequence === 1, "screen A sequence")) return
@@ -47,18 +50,23 @@ ShellRoot {
   }
 
   FakeBar {
-    id: fakeBar
+    id: fakeBarA
+    session: session
+  }
+
+  FakeBar {
+    id: fakeBarB
     session: session
   }
 
   SystemStats.BarWidget {
     id: screenA
-    bar: fakeBar
+    bar: fakeBarA
   }
 
   SystemStats.BarWidget {
     id: screenB
-    bar: fakeBar
+    bar: fakeBarB
   }
 
   Timer {
