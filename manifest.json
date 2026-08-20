@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "reynkedevos.system-stats",
+  "name": "System Stats",
+  "version": "0.1.0",
+  "author": "Reynke De Vos",
+  "description": "Compact shared CPU usage for the Omarchy bar",
+  "license": "MIT",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "System Stats",
+    "description": "Shared CPU usage without per-screen sampling",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
