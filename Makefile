@@ -14,7 +14,7 @@ bin/system-stats-helper: src/system-stats-helper.c
 
 check:
 	$(CC) $(CFLAGS) -fsyntax-only src/system-stats-helper.c
-	clang-format --dry-run --Werror src/system-stats-helper.c
+	clang-format --dry-run --Werror src/system-stats-helper.c tests/native/helper_observer.c
 	$(QMLLINT) Service.qml
 
 validate:
