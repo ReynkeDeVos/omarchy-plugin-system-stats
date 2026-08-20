@@ -16,6 +16,8 @@ cp "$repo_root/tests/qml/session_harness.qml" "$test_dir/shell.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/bin/system-stats-helper"
 cp -R "$repo_root/tests/fixtures/cpu" "$test_dir/fixtures/cpu"
 
+observed_generations=()
+
 run_case() {
   local case_name=$1
   local expected_status=$2
@@ -39,6 +41,11 @@ run_case() {
   printf '%s\n' "$output"
   if (( status != 0 )); then return "$status"; fi
   grep -Fq "TEST-PASS: $case_name public session snapshot" <<<"$output"
+  local generation
+  generation=$(sed -n 's/.*TEST-GENERATION: //p' <<<"$output")
+  [[ $generation =~ ^[0-9]+$ ]]
+  (( generation > 4294967295 ))
+  observed_generations+=("$generation")
 }
 
 run_case normal available 37 ""
@@ -48,3 +55,6 @@ run_case rounding available 13 ""
 run_case missing-field unavailable 0 missingRequiredField
 run_case counter-reset unavailable 0 counterReset
 run_case nonpositive-delta unavailable 0 malformedCounter
+
+unique_generation_count=$(printf '%s\n' "${observed_generations[@]}" | sort -u | wc -l)
+[[ $unique_generation_count -eq ${#observed_generations[@]} ]]

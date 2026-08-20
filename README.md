@@ -19,6 +19,8 @@ The manifest defaults the widget to the right bar section. It can be moved later
 
 The helper reads the aggregate `cpu` row from `/proc/stat` at two consecutive two-second schedule boundaries. Active time is `user + nice + system + irq + softirq + steal`; inactive time is `idle + iowait`. The displayed value is the active share of the complete interval, rounded to the nearest integer with halves rounded up. It is neither smoothed nor sampled through a shorter nested window.
 
+The CPU path is marked fixture-tested. Hardware-confirmed evidence is reserved for the separate real-hardware and resource-budget release gate.
+
 ## Development
 
 Rebuild the packaged helper and run every check with:

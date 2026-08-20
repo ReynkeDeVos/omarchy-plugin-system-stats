@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/random.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -141,6 +142,24 @@ static int64_t monotonic_ms(struct timespec instant) {
   return (int64_t)instant.tv_sec * 1000 + instant.tv_nsec / 1000000;
 }
 
+static uint64_t new_generation(void) {
+  uint64_t entropy = 0;
+  unsigned char *cursor = (unsigned char *)&entropy;
+  size_t remaining = sizeof(entropy);
+  while (remaining > 0) {
+    ssize_t received = getrandom(cursor, remaining, 0);
+    if (received < 0 && errno == EINTR)
+      continue;
+    if (received <= 0)
+      fail("could not create helper generation");
+    cursor += (size_t)received;
+    remaining -= (size_t)received;
+  }
+
+  const uint64_t safe_integer_high_bit = UINT64_C(1) << 52;
+  return safe_integer_high_bit | (entropy & (safe_integer_high_bit - 1));
+}
+
 static struct timespec add_ms(struct timespec instant, long milliseconds) {
   instant.tv_sec += milliseconds / 1000;
   instant.tv_nsec += (milliseconds % 1000) * 1000000L;
@@ -211,6 +230,7 @@ static void emit_hello(uint64_t generation) {
 
 static void emit_snapshot(uint64_t generation, uint64_t sequence,
                           struct timespec sampled_at, int64_t window_ms,
+                          int64_t unavailable_since_ms,
                           const CpuCounters *before, const CpuCounters *after,
                           ParseResult current_result,
                           ParseResult previous_result) {
@@ -235,7 +255,7 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
     printf("{\"status\":\"available\",\"value\":{\"percent\":%d,"
            "\"actualWindowMs\":%" PRId64 "},"
            "\"sampledAtMs\":%" PRId64 ",\"window\":{\"actualMs\":%" PRId64 "},"
-           "\"evidence\":\"hardwareConfirmed\",\"path\":\"proc-stat\"}",
+           "\"evidence\":\"fixtureTested\",\"path\":\"proc-stat\"}",
            percent, window_ms, sampled_at_ms, window_ms);
   } else {
     printf("{\"status\":\"unavailable\","
@@ -246,12 +266,16 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
   }
   printf(",\"ram\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
-         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"retryability\":\"nonRetryable\","
+         "\"diagnostic\":\"metric provider is outside the CPU-only "
+         "slice\"},\"since\":%" PRId64 "},"
          "\"gpu\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
-         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"retryability\":\"nonRetryable\","
+         "\"diagnostic\":\"metric provider is outside the CPU-only "
+         "slice\"},\"since\":%" PRId64 "},"
          "\"source\":{\"status\":\"running\"}}\n",
-         sampled_at_ms, sampled_at_ms);
+         unavailable_since_ms, unavailable_since_ms);
   fflush(stdout);
 }
 
@@ -268,7 +292,8 @@ int main(int argc, char **argv) {
   if (clock_gettime(CLOCK_MONOTONIC, &previous_at) != 0)
     fail("could not read monotonic clock");
   struct timespec deadline = add_ms(previous_at, options.interval_ms);
-  uint64_t generation = (uint64_t)monotonic_ms(previous_at);
+  int64_t started_at_ms = monotonic_ms(previous_at);
+  uint64_t generation = new_generation();
   uint64_t sequence = 0;
 
   emit_hello(generation);
@@ -289,7 +314,8 @@ int main(int argc, char **argv) {
 
     emit_snapshot(generation, ++sequence, sampled_at,
                   monotonic_ms(sampled_at) - monotonic_ms(previous_at),
-                  &previous, &current, current_result, previous_result);
+                  started_at_ms, &previous, &current, current_result,
+                  previous_result);
 
     previous = current;
     previous_result = current_result;

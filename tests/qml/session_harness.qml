@@ -26,14 +26,18 @@ ShellRoot {
   function checkSnapshot(snapshot) {
     if (finished || snapshot.sequence !== 1) return
     if (!verify(snapshot.schemaVersion === 1, "schema version")) return
-    if (!verify(Number.isInteger(snapshot.generation) && snapshot.generation > 0, "generation")) return
+    if (!verify(Number.isSafeInteger(snapshot.generation), "safe generation")) return
+    if (!verify(snapshot.generation > 4294967295, "wide generation")) return
     var expectedPhase = expectedStatus === "available" ? "live" : "degraded"
     if (!verify(snapshot.phase === expectedPhase, "snapshot phase")) return
     if (!verify(snapshot.cpu.status === expectedStatus, "CPU status")) return
+    if (!verify(snapshot.ram.status === "unavailable" && snapshot.ram.since > 0, "stable RAM unavailability")) return
+    if (!verify(snapshot.gpu.status === "unavailable" && snapshot.gpu.since === snapshot.ram.since, "stable GPU unavailability")) return
     if (expectedStatus === "available") {
       if (!verify(snapshot.cpu.value.percent === expectedPercent, caseName + " CPU percentage")) return
       if (!verify(snapshot.cpu.value.actualWindowMs > 0, caseName + " complete CPU window")) return
       if (!verify(snapshot.cpu.value.actualWindowMs === snapshot.cpu.window.actualMs, caseName + " window identity")) return
+      if (!verify(snapshot.cpu.evidence === "fixtureTested", caseName + " evidence status")) return
     } else if (expectedError !== "") {
       if (!verify(snapshot.cpu.error.code === expectedError, caseName + " CPU error")) return
     }
@@ -42,6 +46,7 @@ ShellRoot {
     if (snapshot.cpu.value && !verify(Object.isFrozen(snapshot.cpu.value), "CPU value immutability")) return
 
     finished = true
+    console.log("TEST-GENERATION: " + snapshot.generation)
     console.log("TEST-PASS: " + caseName + " public session snapshot")
     Qt.quit()
   }
@@ -64,6 +69,7 @@ ShellRoot {
   Component.onCompleted: {
     if (!verify(session.current.phase === "initializing", "initial phase")) return
     if (!verify(session.current.sequence === 0, "initial sequence")) return
+    if (!verify(session.current.cpu.since === 0, "initial CPU since")) return
     if (!verify(Object.isFrozen(session.current), "initial snapshot immutability")) return
   }
 }

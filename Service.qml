@@ -14,20 +14,30 @@ Item {
     configRevision: 0,
     phase: "initializing",
     publishedAtMs: 0,
-    cpu: { status: "initializing" },
+    cpu: { status: "initializing", since: 0 },
     ram: {
       status: "unavailable",
-      error: { code: "dependencyMissing", scope: "ram", retryability: "nonRetryable" },
+      error: {
+        code: "dependencyMissing",
+        scope: "ram",
+        retryability: "nonRetryable",
+        diagnostic: "metric provider is outside the CPU-only slice"
+      },
       since: 0
     },
     gpu: {
       status: "unavailable",
-      error: { code: "dependencyMissing", scope: "gpu", retryability: "nonRetryable" },
+      error: {
+        code: "dependencyMissing",
+        scope: "gpu",
+        retryability: "nonRetryable",
+        diagnostic: "metric provider is outside the CPU-only slice"
+      },
       since: 0
     },
     source: { status: "starting" }
   })
-  property int _generation: 0
+  property double _generation: 0
   property int _sequence: 0
 
   function _helperPath() {
@@ -51,7 +61,7 @@ Item {
 
     if (message.schemaVersion !== 1) return
     if (message.type === "hello") {
-      if (!Number.isInteger(message.generation) || message.generation <= 0) return
+      if (!Number.isSafeInteger(message.generation) || message.generation <= 0) return
       _generation = message.generation
       _sequence = 0
       return
