@@ -31,6 +31,11 @@ typedef struct {
   long interval_ms;
 } Options;
 
+typedef struct {
+  const char *code;
+  int64_t since_ms;
+} CpuFailureState;
+
 typedef enum {
   PARSE_OK,
   PARSE_MISSING_FIELD,
@@ -231,6 +236,7 @@ static void emit_hello(uint64_t generation) {
 static void emit_snapshot(uint64_t generation, uint64_t sequence,
                           struct timespec sampled_at, int64_t window_ms,
                           int64_t unavailable_since_ms,
+                          CpuFailureState *cpu_failure,
                           const CpuCounters *before, const CpuCounters *after,
                           ParseResult current_result,
                           ParseResult previous_result) {
@@ -247,6 +253,14 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
   }
 
   int64_t sampled_at_ms = monotonic_ms(sampled_at);
+  if (available) {
+    cpu_failure->code = NULL;
+  } else if (cpu_failure->code == NULL ||
+             strcmp(cpu_failure->code, error) != 0) {
+    cpu_failure->code = error;
+    cpu_failure->since_ms = sampled_at_ms;
+  }
+
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"sequence\":%" PRIu64 ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64
          ",\"cpu\":",
@@ -262,7 +276,7 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
            "\"error\":{\"code\":\"%s\",\"scope\":\"cpu\","
            "\"retryability\":\"retryable\",\"pathId\":\"proc-stat\"},"
            "\"since\":%" PRId64 "}",
-           error, sampled_at_ms);
+           error, cpu_failure->since_ms);
   }
   printf(",\"ram\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
@@ -295,6 +309,7 @@ int main(int argc, char **argv) {
   int64_t started_at_ms = monotonic_ms(previous_at);
   uint64_t generation = new_generation();
   uint64_t sequence = 0;
+  CpuFailureState cpu_failure = {0};
 
   emit_hello(generation);
 
@@ -314,8 +329,8 @@ int main(int argc, char **argv) {
 
     emit_snapshot(generation, ++sequence, sampled_at,
                   monotonic_ms(sampled_at) - monotonic_ms(previous_at),
-                  started_at_ms, &previous, &current, current_result,
-                  previous_result);
+                  started_at_ms, &cpu_failure, &previous, &current,
+                  current_result, previous_result);
 
     previous = current;
     previous_result = current_result;

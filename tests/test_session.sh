@@ -23,6 +23,7 @@ run_case() {
   local expected_status=$2
   local expected_percent=$3
   local expected_error=$4
+  local expected_sequence=${5:-1}
   local output
   local status
 
@@ -31,6 +32,7 @@ run_case() {
     SYSTEM_STATS_EXPECTED_STATUS="$expected_status" \
     SYSTEM_STATS_EXPECTED_PERCENT="$expected_percent" \
     SYSTEM_STATS_EXPECTED_ERROR="$expected_error" \
+    SYSTEM_STATS_EXPECTED_SEQUENCE="$expected_sequence" \
     SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/$case_name.stat" \
     SYSTEM_STATS_INTERVAL_MS=1 \
     QT_QPA_PLATFORM=offscreen \
@@ -54,7 +56,7 @@ run_case hundred available 100 ""
 run_case rounding available 13 ""
 run_case missing-field unavailable 0 missingRequiredField
 run_case counter-reset unavailable 0 counterReset
-run_case nonpositive-delta unavailable 0 malformedCounter
+run_case nonpositive-delta unavailable 0 malformedCounter 2
 
 unique_generation_count=$(printf '%s\n' "${observed_generations[@]}" | sort -u | wc -l)
 [[ $unique_generation_count -eq ${#observed_generations[@]} ]]
