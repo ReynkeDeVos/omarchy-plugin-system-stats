@@ -34,9 +34,3 @@ if rg -n '\b(system|popen|fork|exec[lv]?[pe]?)\s*\(' "$repo_root/src/system-stat
   echo "helper must not create sample subprocesses" >&2
   exit 1
 fi
-
-[[ $(rg -o 'clock_nanosleep\s*\(' "$repo_root/src/system-stats-helper.c" | wc -l) -eq 1 ]]
-if rg -n '\b(timerfd_create|timer_create|setitimer)\s*\(' "$repo_root/src/system-stats-helper.c"; then
-  echo "helper must own exactly one sampling scheduler" >&2
-  exit 1
-fi

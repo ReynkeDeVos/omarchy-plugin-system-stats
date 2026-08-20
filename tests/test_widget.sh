@@ -26,8 +26,17 @@ cp -R /usr/share/omarchy/shell/Ui/. "$test_dir/Ui/"
 cp -R /usr/share/omarchy/shell/Commons/. "$test_dir/Commons/"
 
 output_file="$test_dir/quickshell.log"
+trace_file="$test_dir/helper.trace"
+observer="$test_dir/helper-observer.so"
+cc -std=c17 -O2 -Wall -Wextra -Werror -shared -fPIC \
+  "$repo_root/tests/native/helper_observer.c" -o "$observer" -ldl
+
+helper_path=$(readlink -f "$test_dir/plugin/bin/system-stats-helper")
 SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/normal.stat" \
   SYSTEM_STATS_INTERVAL_MS=20 \
+  SYSTEM_STATS_TRACE_EXECUTABLE="$helper_path" \
+  SYSTEM_STATS_TRACE_FILE="$trace_file" \
+  LD_PRELOAD="$observer" \
   QT_QPA_PLATFORM=offscreen \
   quickshell --no-color --path "$test_dir/shell.qml" >"$output_file" 2>&1 &
 shell_pid=$!
@@ -48,7 +57,6 @@ if [[ $ready != true ]]; then
   exit 1
 fi
 
-helper_path=$(readlink -f "$test_dir/plugin/bin/system-stats-helper")
 children=()
 read -r -a children <"/proc/$shell_pid/task/$shell_pid/children" || true
 helper_pids=()
@@ -71,11 +79,6 @@ read -r helper_children <"/proc/$helper_pid/task/$helper_pid/children" || true
 mapfile -t helper_tasks < <(find "/proc/$helper_pid/task" -mindepth 1 -maxdepth 1 -type d)
 [[ ${#helper_tasks[@]} -eq 1 ]]
 
-if rg -n '\bTimer\s*\{' "$repo_root/Service.qml" "$repo_root/BarWidget.qml"; then
-  echo "service and widgets must not create another QML sampling timer" >&2
-  exit 1
-fi
-
 status=0
 for ((attempt = 0; attempt < 200; attempt++)); do
   if ! kill -0 "$shell_pid" 2>/dev/null; then
@@ -95,3 +98,9 @@ fi
 cat "$output_file"
 if (( status != 0 )); then exit "$status"; fi
 grep -Fq "TEST-PASS: two widgets share one session" "$output_file"
+
+mapfile -t launch_events < <(awk '$1 == "launch" { print $2 }' "$trace_file")
+mapfile -t wait_processes < <(awk '$1 == "wait" { print $2 }' "$trace_file" | sort -u)
+[[ ${#launch_events[@]} -eq 1 ]]
+[[ ${#wait_processes[@]} -eq 1 ]]
+[[ ${wait_processes[0]} == "${launch_events[0]}" ]]
