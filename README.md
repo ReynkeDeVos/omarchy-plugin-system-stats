@@ -17,7 +17,15 @@ The manifest defaults the widget to the right bar section. It can be moved later
 
 ## How CPU usage is measured
 
-The helper reads the aggregate `cpu` row from `/proc/stat` at two consecutive two-second schedule boundaries. Active time is `user + nice + system + irq + softirq + steal`; inactive time is `idle + iowait`. The displayed value is the active share of the complete interval, rounded to the nearest integer with halves rounded up. It is neither smoothed nor sampled through a shorter nested window.
+The helper reads the aggregate `cpu` row from `/proc/stat` at two consecutive schedule boundaries. The interval defaults to two seconds and `SystemStatsSession.configure(...)` accepts whole values from two through ten seconds without restarting the helper. An interval change discards the old CPU basis, publishes initialization, and waits for one complete new window.
+
+Active time is `user + nice + system + irq + softirq + steal`; inactive time is `idle + iowait`. The displayed value is the active share of the complete interval, rounded to the nearest integer with halves rounded up. It is neither smoothed nor sampled through a shorter nested window.
+
+## Failure handling
+
+An expected failed sample becomes unavailable immediately. Every successful value has an absolute four-second freshness limit, so intervals from five through ten seconds intentionally have a short unavailable gap before their next sample.
+
+The session validates the helper protocol and supervises the process. A crash restarts with `1, 2, 4, 8, 16, 30, 30 …` second backoff, reset after 60 seconds of stable operation. A helper that misses its scheduled result by two seconds is terminated before a replacement can start. The shared source state exposes the error, last successful sample, and next restart time.
 
 The CPU path is marked fixture-tested. Hardware-confirmed evidence is reserved for the separate real-hardware and resource-budget release gate.
 
@@ -30,7 +38,7 @@ make build
 make test
 ```
 
-Tests exercise CPU behavior through the public `SystemStatsSession.current` state exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. The widget smoke test instantiates two callers against one service, then inspects the live process tree to verify that only one single-threaded helper and scheduler exist.
+Tests exercise CPU behavior through the public `SystemStatsSession.current` and `configure(...)` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke test instantiates two callers against one service, then inspects the live process tree to verify that only one single-threaded helper and scheduler exist.
 
 ## License
 

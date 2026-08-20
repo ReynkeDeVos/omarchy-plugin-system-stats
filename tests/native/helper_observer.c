@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,6 +66,18 @@ int clock_nanosleep(clockid_t clock_id, int flags,
 
   record_sampler_thread();
   return real_clock_nanosleep(clock_id, flags, request, remaining);
+}
+
+int poll(struct pollfd *descriptors, nfds_t count, int timeout) {
+  typedef int (*Poll)(struct pollfd *, nfds_t, int);
+  static Poll real_poll = NULL;
+  if (real_poll == NULL) {
+    void *symbol = dlsym(RTLD_NEXT, "poll");
+    memcpy(&real_poll, &symbol, sizeof(real_poll));
+  }
+
+  record_sampler_thread();
+  return real_poll(descriptors, count, timeout);
 }
 
 int timerfd_create(int clock_id, int flags) {

@@ -14,7 +14,7 @@ bin/system-stats-helper: src/system-stats-helper.c
 
 check:
 	$(CC) $(CFLAGS) -fsyntax-only src/system-stats-helper.c
-	clang-format --dry-run --Werror src/system-stats-helper.c tests/native/helper_observer.c
+	clang-format --dry-run --Werror src/system-stats-helper.c tests/native/helper_observer.c tests/native/scripted_helper.c
 	$(QMLLINT) Service.qml
 
 validate:
@@ -23,4 +23,8 @@ validate:
 test: build check validate
 	bash tests/test_helper.sh
 	bash tests/test_session.sh
+	bash tests/test_configuration.sh
+	bash tests/test_freshness.sh
+	bash tests/test_protocol.sh
+	bash tests/test_supervision.sh
 	bash tests/test_widget.sh
