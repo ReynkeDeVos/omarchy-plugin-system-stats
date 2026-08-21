@@ -7,6 +7,32 @@ ShellRoot {
 
   property bool finished: false
   property bool ready: false
+  property real screenAWidth: 0
+  property real screenBWidth: 0
+
+  function checkGiBFormats() {
+    if (!verify(screenA.snapshotSequence === 1, "screen A format switch reuses snapshot")) return
+    if (!verify(screenB.snapshotSequence === 1, "screen B format switch reuses snapshot")) return
+    if (!verify(screenA.ramDisplayValue === "10.0/16.0", "screen A RAM GiB value")) return
+    if (!verify(screenB.ramDisplayValue === "10.0/16.0", "screen B RAM GiB value")) return
+    if (!verify(screenA.ramDisplayUnit === " GiB", "screen A RAM GiB unit")) return
+    if (!verify(screenB.ramDisplayUnit === " GiB", "screen B RAM GiB unit")) return
+    if (!verify(screenA.implicitWidth === screenAWidth, "screen A width remains reserved")) return
+    if (!verify(screenB.implicitWidth === screenBWidth, "screen B width remains reserved")) return
+
+    screenA.settings = ({ ramDisplayFormat: "invalid" })
+    Qt.callLater(checkInvalidFormat)
+  }
+
+  function checkInvalidFormat() {
+    if (!verify(screenA.ramDisplayFormat === "percent", "invalid RAM format falls back")) return
+    if (!verify(screenA.ramDisplayValue === "63", "fallback RAM percentage")) return
+    if (!verify(screenA.implicitWidth === screenAWidth, "fallback keeps reserved width")) return
+
+    ready = true
+    console.log("TEST-READY: two widgets share one session")
+    finishTimer.start()
+  }
 
   function fail(message) {
     if (finished) return
@@ -30,14 +56,24 @@ ShellRoot {
     if (!verify(screenA.snapshotSequence === 1, "screen A sequence")) return
     if (!verify(screenB.snapshotSequence === 1, "screen B sequence")) return
     if (!verify(screenA.cpuVisible && screenB.cpuVisible, "CPU metrics visible")) return
-    if (!verify(!screenA.ramVisible && !screenB.ramVisible, "RAM metrics hidden")) return
+    if (!verify(screenA.ramVisible && screenB.ramVisible, "RAM metrics visible")) return
     if (!verify(!screenA.gpuVisible && !screenB.gpuVisible, "GPU metrics hidden")) return
     if (!verify(screenA.displayValue === "37", "screen A CPU value")) return
     if (!verify(screenB.displayValue === "37", "screen B CPU value")) return
+    if (!verify(screenA.ramDisplayFormat === "percent", "screen A default RAM format")) return
+    if (!verify(screenB.ramDisplayFormat === "percent", "screen B default RAM format")) return
+    if (!verify(screenA.ramDisplayValue === "63", "screen A RAM percentage")) return
+    if (!verify(screenB.ramDisplayValue === "63", "screen B RAM percentage")) return
+    if (!verify(screenA.ramDisplayUnit === "%", "screen A RAM percentage unit")) return
+    if (!verify(screenB.ramDisplayUnit === "%", "screen B RAM percentage unit")) return
+    if (!verify(screenA.Accessible.name.indexOf("RAM 63 Prozent") !== -1,
+                "RAM percentage is accessible")) return
 
-    ready = true
-    console.log("TEST-READY: two widgets share one session")
-    finishTimer.start()
+    screenAWidth = screenA.implicitWidth
+    screenBWidth = screenB.implicitWidth
+    screenA.settings = ({ ramDisplayFormat: "gib" })
+    screenB.settings = ({ ramDisplayFormat: "gib" })
+    Qt.callLater(checkGiBFormats)
   }
 
   SystemStats.Service {
@@ -89,5 +125,6 @@ ShellRoot {
   Component.onCompleted: {
     if (!verify(screenA.initializing && screenB.initializing, "initialization display")) return
     if (!verify(!screenA.cpuVisible && !screenB.cpuVisible, "CPU hidden while initializing")) return
+    if (!verify(!screenA.ramVisible && !screenB.ramVisible, "RAM hidden while initializing")) return
   }
 }

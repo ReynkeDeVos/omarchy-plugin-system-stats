@@ -86,15 +86,16 @@ static void emit_snapshot_at(uint64_t generation, uint64_t sequence,
          "\"sampledAtMs\":%" PRId64
          ",\"window\":{\"actualMs\":10},\"evidence\":\"fixtureTested\","
          "\"path\":\"scripted\"},"
-         "\"ram\":{\"status\":\"unavailable\","
-         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
-         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"ram\":{\"status\":\"available\","
+         "\"value\":{\"percent\":63,\"usedBytes\":10737418240,"
+         "\"totalBytes\":17179869184},\"sampledAtMs\":%" PRId64 ","
+         "\"evidence\":\"fixtureTested\",\"path\":\"scripted\"},"
          "\"gpu\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
          "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
          "\"source\":{\"status\":\"running\"}}\n",
          generation, sequence, published_at_ms, percent, sampled_at_ms,
-         published_at_ms, published_at_ms);
+         sampled_at_ms, published_at_ms);
   fflush(stdout);
 }
 

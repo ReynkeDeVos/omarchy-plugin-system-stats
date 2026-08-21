@@ -12,29 +12,54 @@ BarWidget {
   readonly property int snapshotSequence: snapshot ? snapshot.sequence : 0
   readonly property bool initializing: !snapshot || snapshot.phase === "initializing"
   readonly property bool cpuVisible: !initializing && snapshot.cpu.status === "available"
-  readonly property bool ramVisible: false
+  readonly property bool ramVisible: !initializing && snapshot.ram.status === "available"
   readonly property bool gpuVisible: false
   readonly property string displayValue: cpuVisible ? String(snapshot.cpu.value.percent) : ""
-  readonly property bool warningVisible: !initializing && !cpuVisible
+  readonly property string ramDisplayFormat: String(setting("ramDisplayFormat", "percent")) === "gib"
+    ? "gib" : "percent"
+  readonly property string ramGiBValue: ramVisible
+    ? formatGiB(snapshot.ram.value.usedBytes) + "/" + formatGiB(snapshot.ram.value.totalBytes)
+    : ""
+  readonly property string ramDisplayValue: !ramVisible ? ""
+    : (ramDisplayFormat === "gib" ? ramGiBValue : String(snapshot.ram.value.percent))
+  readonly property string ramDisplayUnit: ramDisplayFormat === "gib" ? " GiB" : "%"
+  readonly property bool warningVisible: !initializing && !cpuVisible && !ramVisible && !gpuVisible
   readonly property color metricColor: bar ? bar.barForeground : Color.foreground
+
+  function formatGiB(bytes) {
+    return (Number(bytes) / 1073741824).toFixed(1)
+  }
+
+  function accessibleDescription() {
+    if (initializing) return "System Stats wird initialisiert"
+    var metrics = []
+    if (cpuVisible) metrics.push("CPU " + displayValue + " Prozent")
+    if (ramVisible) {
+      metrics.push(ramDisplayFormat === "gib"
+        ? "RAM " + ramGiBValue + " GiB"
+        : "RAM " + ramDisplayValue + " Prozent")
+    }
+    return metrics.length > 0
+      ? "System Stats, " + metrics.join(", ")
+      : "System Stats, Messwerte nicht verfügbar"
+  }
 
   implicitWidth: content.implicitWidth + Style.space(10)
   implicitHeight: barSize
 
   Accessible.role: Accessible.StaticText
-  Accessible.name: initializing
-    ? "System Stats wird initialisiert"
-    : (cpuVisible
-        ? "System Stats, CPU " + displayValue + " Prozent"
-        : "System Stats, Messwert nicht verfügbar")
+  Accessible.name: accessibleDescription()
 
-  onMetricColorChanged: cpuIcon.requestPaint()
+  onMetricColorChanged: {
+    cpuIcon.requestPaint()
+    ramIcon.requestPaint()
+  }
 
   Row {
     id: content
 
     anchors.centerIn: parent
-    spacing: 0
+    spacing: Style.space(4)
 
     Text {
       visible: root.initializing
@@ -121,6 +146,81 @@ BarWidget {
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body
         renderType: Text.NativeRendering
+      }
+    }
+
+    Row {
+      visible: root.ramVisible
+      spacing: Style.space(2)
+
+      Canvas {
+        id: ramIcon
+
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(12)
+        height: width
+
+        onPaint: {
+          var context = getContext("2d")
+          var scale = width / 16
+          context.reset()
+          context.strokeStyle = root.metricColor
+          context.lineWidth = Math.max(1, 1.45 * scale)
+          context.lineCap = "round"
+          context.lineJoin = "round"
+          context.strokeRect(2 * scale, 4.5 * scale, 12 * scale, 7 * scale)
+          context.strokeRect(4 * scale, 6.5 * scale, 2 * scale, 3 * scale)
+          context.strokeRect(7 * scale, 6.5 * scale, 2 * scale, 3 * scale)
+          context.strokeRect(10 * scale, 6.5 * scale, 2 * scale, 3 * scale)
+
+          var pins = [4, 7, 10, 12]
+          for (var i = 0; i < pins.length; i++) {
+            var point = pins[i] * scale
+            context.beginPath()
+            context.moveTo(point, 11.5 * scale)
+            context.lineTo(point, 13.5 * scale)
+            context.stroke()
+          }
+        }
+
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+      }
+
+      Item {
+        anchors.verticalCenter: parent.verticalCenter
+        width: Math.max(ramPercentMetrics.advanceWidth, ramGiBCapacityMetrics.advanceWidth)
+        height: ramValueText.implicitHeight
+
+        Text {
+          id: ramValueText
+
+          anchors.fill: parent
+          text: root.ramDisplayValue + root.ramDisplayUnit
+          color: root.metricColor
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.body
+          font.features: { "tnum": 1 }
+          horizontalAlignment: Text.AlignLeft
+          verticalAlignment: Text.AlignVCenter
+          renderType: Text.NativeRendering
+        }
+
+        TextMetrics {
+          id: ramPercentMetrics
+          font: ramValueText.font
+          text: "100%"
+        }
+
+        TextMetrics {
+          id: ramGiBCapacityMetrics
+          font: ramValueText.font
+          text: root.ramVisible
+            ? root.formatGiB(root.snapshot.ram.value.totalBytes)
+              + "/" + root.formatGiB(root.snapshot.ram.value.totalBytes) + " GiB"
+            : "0.0/0.0 GiB"
+        }
       }
     }
 

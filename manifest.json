@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "reynkedevos.system-stats",
   "name": "System Stats",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Reynke De Vos",
-  "description": "Compact shared CPU usage for the Omarchy bar",
+  "description": "Compact shared CPU and RAM usage for the Omarchy bar",
   "license": "MIT",
   "kinds": [
     "service",
@@ -17,9 +17,22 @@
   },
   "barWidget": {
     "displayName": "System Stats",
-    "description": "Shared CPU usage without per-screen sampling",
+    "description": "Shared CPU and RAM usage without per-screen sampling",
     "category": "System",
     "allowMultiple": false,
+    "defaults": {
+      "ramDisplayFormat": "percent"
+    },
+    "schema": [
+      {
+        "key": "ramDisplayFormat",
+        "type": "enum",
+        "label": "RAM display format",
+        "description": "Show RAM as a percentage or as used/total IEC GiB.",
+        "options": ["percent", "gib"],
+        "defaultValue": "percent"
+      }
+    ],
     "defaultSection": "right"
   }
 }

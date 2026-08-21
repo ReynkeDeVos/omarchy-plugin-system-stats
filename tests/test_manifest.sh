@@ -12,6 +12,13 @@ jq -e '
   and .kinds == ["service", "bar-widget"]
   and .entryPoints.service == "Service.qml"
   and .entryPoints.barWidget == "BarWidget.qml"
+  and .barWidget.defaults.ramDisplayFormat == "percent"
+  and (.barWidget.schema | any(
+    .key == "ramDisplayFormat"
+    and .type == "enum"
+    and .options == ["percent", "gib"]
+    and .defaultValue == "percent"
+  ))
 ' "$repo_root/manifest.json" >/dev/null
 
 test -x "$repo_root/bin/system-stats-helper"

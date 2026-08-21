@@ -18,23 +18,14 @@ Item {
     phase: "initializing",
     publishedAtMs: 0,
     cpu: { status: "initializing", since: 0 },
-    ram: {
-      status: "unavailable",
-      error: {
-        code: "dependencyMissing",
-        scope: "ram",
-        retryability: "nonRetryable",
-        diagnostic: "metric provider is outside the CPU-only slice"
-      },
-      since: 0
-    },
+    ram: { status: "initializing", since: 0 },
     gpu: {
       status: "unavailable",
       error: {
         code: "dependencyMissing",
         scope: "gpu",
         retryability: "nonRetryable",
-        diagnostic: "metric provider is outside the CPU-only slice"
+        diagnostic: "metric provider is outside the CPU and RAM slice"
       },
       since: 0
     },
@@ -52,7 +43,9 @@ Item {
   }
   readonly property int _watchdogTickMs: Math.max(1, Math.min(100, Math.floor(_secondMs / 4)))
   property double _cpuStateStartedAtMs: 0
+  property double _ramStateStartedAtMs: 0
   property double _lastCpuSuccessfulAt: -1
+  property double _lastRamSuccessfulAt: -1
   property double _helperClockOffsetMs: 0
   property bool _hasHelperClockOffset: false
   property bool _helloReceived: false
@@ -192,6 +185,16 @@ Item {
     }
   }
 
+  function _withLastRamSuccess(metric) {
+    if (metric.status !== "unavailable" || _lastRamSuccessfulAt < 0) return metric
+    return {
+      status: metric.status,
+      error: metric.error,
+      since: metric.since,
+      lastSuccessfulAt: _lastRamSuccessfulAt
+    }
+  }
+
   function _staleCpuMetric() {
     var stale = {
       status: "unavailable",
@@ -207,11 +210,32 @@ Item {
     return stale
   }
 
-  function _publishStaleCpu() {
+  function _staleRamMetric() {
+    var stale = {
+      status: "unavailable",
+      error: {
+        code: "stale",
+        scope: "ram",
+        retryability: "retryable",
+        pathId: "proc-meminfo"
+      },
+      since: _helperNowMs()
+    }
+    if (_lastRamSuccessfulAt >= 0) stale.lastSuccessfulAt = _lastRamSuccessfulAt
+    return stale
+  }
+
+  function _phaseForMetrics(cpu, ram) {
+    if (cpu.status === "initializing" && ram.status === "initializing") return "initializing"
+    return cpu.status === "available" && ram.status === "available" ? "live" : "degraded"
+  }
+
+  function _publishStaleMetrics(cpu, ram) {
     _publishSnapshotChanges({
-      phase: "degraded",
+      phase: _phaseForMetrics(cpu, ram),
       publishedAtMs: _helperNowMs(),
-      cpu: _staleCpuMetric()
+      cpu: cpu,
+      ram: ram
     })
   }
 
@@ -265,24 +289,48 @@ Item {
       since: _failureSince
     }
     if (_lastCpuSuccessfulAt >= 0) cpu.lastSuccessfulAt = _lastCpuSuccessfulAt
+    var ram = {
+      status: "unavailable",
+      error: {
+        code: code,
+        scope: "ram",
+        retryability: "retryable",
+        pathId: "proc-meminfo"
+      },
+      since: _failureSince
+    }
+    if (_lastRamSuccessfulAt >= 0) ram.lastSuccessfulAt = _lastRamSuccessfulAt
     _publishSnapshotChanges({
       phase: "degraded",
       publishedAtMs: _helperNowMs(),
       cpu: cpu,
+      ram: ram,
       source: _collectorFailureSource(code, status, failureAt, nextRestartAt)
     })
   }
 
   function _checkFreshness() {
-    var ageMs
+    var cpuAgeMs
     if (_current.cpu.status === "initializing") {
-      ageMs = _nowMs() - _cpuStateStartedAtMs
+      cpuAgeMs = _nowMs() - _cpuStateStartedAtMs
     } else if (_current.cpu.status === "available") {
-      ageMs = _helperNowMs() - _lastCpuSuccessfulAt
+      cpuAgeMs = _helperNowMs() - _lastCpuSuccessfulAt
     } else {
-      ageMs = -1
+      cpuAgeMs = -1
     }
-    if (ageMs >= 4 * _secondMs) _publishStaleCpu()
+
+    var ramAgeMs
+    if (_current.ram.status === "initializing") {
+      ramAgeMs = _nowMs() - _ramStateStartedAtMs
+    } else if (_current.ram.status === "available") {
+      ramAgeMs = _helperNowMs() - _lastRamSuccessfulAt
+    } else {
+      ramAgeMs = -1
+    }
+
+    var cpu = cpuAgeMs >= 4 * _secondMs ? _staleCpuMetric() : _current.cpu
+    var ram = ramAgeMs >= 4 * _secondMs ? _staleRamMetric() : _current.ram
+    if (cpu !== _current.cpu || ram !== _current.ram) _publishStaleMetrics(cpu, ram)
 
     if (collector.running
         && _expectedSampleAtMs >= 0
@@ -311,6 +359,7 @@ Item {
     _terminationReason = ""
     _failureSince = -1
     _cpuStateStartedAtMs = _nowMs()
+    _ramStateStartedAtMs = _nowMs()
     _expectedSampleAtMs = _nowMs() + _intervalSeconds * _secondMs
     _publishSource({ status: "starting" })
     _hasHelperClockOffset = false
@@ -448,14 +497,12 @@ Item {
         || message.configRevision !== _configRevision
         || !Number.isSafeInteger(message.publishedAtMs)
         || message.publishedAtMs < 0
-        || !_validMetric(message.cpu, true)
-        || !_validMetric(message.ram, false)
-        || !_validMetric(message.gpu, false)
+        || !_validCpuMetric(message.cpu)
+        || !_validRamMetric(message.ram)
+        || !_validGpuMetric(message.gpu)
         || !message.source
         || message.source.status !== "running"
-        || ((message.phase === "initializing") !== (message.cpu.status === "initializing"))
-        || ((message.phase === "live") !== (message.cpu.status === "available"))
-        || ((message.phase === "degraded") !== (message.cpu.status === "unavailable"))) {
+        || message.phase !== _phaseForMetrics(message.cpu, message.ram)) {
       _publishProtocolError()
       return
     }
@@ -463,16 +510,24 @@ Item {
     var receivedAtMs = _nowMs()
     _observeHelperClock(message.publishedAtMs, receivedAtMs)
     var cpuMetric = message.cpu
-    var snapshotPhase = message.phase
     if (cpuMetric.status === "available") {
       _lastCpuSuccessfulAt = cpuMetric.sampledAtMs
       if (_helperNowMs() - _lastCpuSuccessfulAt >= 4 * _secondMs) {
         cpuMetric = _staleCpuMetric()
-        snapshotPhase = "degraded"
       }
     } else {
       _cpuStateStartedAtMs = receivedAtMs
       cpuMetric = _withLastCpuSuccess(cpuMetric)
+    }
+    var ramMetric = message.ram
+    if (ramMetric.status === "available") {
+      _lastRamSuccessfulAt = ramMetric.sampledAtMs
+      if (_helperNowMs() - _lastRamSuccessfulAt >= 4 * _secondMs) {
+        ramMetric = _staleRamMetric()
+      }
+    } else {
+      _ramStateStartedAtMs = receivedAtMs
+      ramMetric = _withLastRamSuccess(ramMetric)
     }
     if (message.phase !== "initializing") {
       _expectedSampleAtMs = receivedAtMs + _intervalSeconds * _secondMs
@@ -485,10 +540,10 @@ Item {
       generation: message.generation,
       sequence: message.sequence,
       configRevision: message.configRevision,
-      phase: snapshotPhase,
+      phase: _phaseForMetrics(cpuMetric, ramMetric),
       publishedAtMs: message.publishedAtMs,
       cpu: cpuMetric,
-      ram: message.ram,
+      ram: ramMetric,
       gpu: message.gpu,
       source: { status: "running" }
     })
@@ -528,13 +583,13 @@ Item {
     if (!command.silent) commandSettled(message.commandId, true, "")
   }
 
-  function _validMetric(metric, allowsAvailable) {
+  function _validMetricState(metric, allowsInitializing) {
     if (!metric
         || (metric.status !== "initializing"
             && metric.status !== "available"
             && metric.status !== "unavailable")) return false
     if (metric.status === "initializing") {
-      return allowsAvailable && Number.isInteger(metric.since) && metric.since >= 0
+      return allowsInitializing && Number.isInteger(metric.since) && metric.since >= 0
     }
     if (metric.status === "unavailable") {
       return metric.error
@@ -544,7 +599,12 @@ Item {
         && Number.isInteger(metric.since)
         && metric.since >= 0
     }
-    if (!allowsAvailable) return false
+    return true
+  }
+
+  function _validCpuMetric(metric) {
+    if (!_validMetricState(metric, true)) return false
+    if (metric.status !== "available") return true
     if (!metric.value
         || !Number.isInteger(metric.value.percent)
         || !Number.isInteger(metric.value.actualWindowMs)) return false
@@ -559,6 +619,28 @@ Item {
       && metric.window.actualMs === metric.value.actualWindowMs
       && typeof metric.evidence === "string"
       && typeof metric.path === "string"
+  }
+
+  function _validRamMetric(metric) {
+    if (!_validMetricState(metric, true)) return false
+    if (metric.status !== "available") return true
+    return metric.value
+      && Number.isInteger(metric.value.percent)
+      && metric.value.percent >= 0
+      && metric.value.percent <= 100
+      && Number.isSafeInteger(metric.value.usedBytes)
+      && metric.value.usedBytes >= 0
+      && Number.isSafeInteger(metric.value.totalBytes)
+      && metric.value.totalBytes > 0
+      && metric.value.usedBytes <= metric.value.totalBytes
+      && Number.isInteger(metric.sampledAtMs)
+      && metric.sampledAtMs >= 0
+      && typeof metric.evidence === "string"
+      && typeof metric.path === "string"
+  }
+
+  function _validGpuMetric(metric) {
+    return _validMetricState(metric, false) && metric.status === "unavailable"
   }
 
   Process {

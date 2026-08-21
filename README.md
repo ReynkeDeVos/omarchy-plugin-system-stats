@@ -1,9 +1,8 @@
 # System Stats
 
-System Stats is an Omarchy Quattro plugin that puts one compact, shared CPU metric in every screen's bar. A session-wide service owns one long-lived native helper, so adding a screen does not add another sampler or timer.
+System Stats is an Omarchy Quattro plugin that puts compact, shared CPU and RAM metrics in every screen's bar. A session-wide service owns one long-lived native helper, so adding a screen does not add another sampler or timer.
 
-This first vertical slice intentionally shows CPU only. RAM and GPU are unavailable in the published snapshot and stay hidden in the bar rather than appearing as invented zero values.
-Their transitional `dependencyMissing` state is intentionally limited to this CPU-only slice.
+RAM is shown as a whole percentage by default. Omarchy's bar settings can switch it to used/total IEC GiB with one decimal place; the change reuses the current sample and keeps the widget width stable. GPU remains unavailable in this slice and stays hidden rather than appearing as an invented zero value.
 
 ## Install
 
@@ -15,15 +14,17 @@ omarchy plugin add https://github.com/ReynkeDeVos/omarchy-plugin-system-stats.gi
 
 The manifest defaults the widget to the right bar section. It can be moved later with Omarchy's bar tools.
 
-## How CPU usage is measured
+## How usage is measured
 
 The helper reads the aggregate `cpu` row from `/proc/stat` at two consecutive schedule boundaries. The interval defaults to two seconds and `SystemStatsSession.configure(...)` accepts whole values from two through ten seconds without restarting the helper. An interval change discards the old CPU basis, publishes initialization, and waits for one complete new window.
 
 Active time is `user + nice + system + irq + softirq + steal`; inactive time is `idle + iowait`. The displayed value is the active share of the complete interval, rounded to the nearest integer with halves rounded up. It is neither smoothed nor sampled through a shorter nested window.
 
+At the same schedule boundary, the helper reads `/proc/meminfo`. RAM usage is exclusively `MemTotal - MemAvailable`; the percentage is that result divided by `MemTotal`. Swap, VRAM, `MemFree`, and process RSS are not used. Missing fields, zero total memory, malformed sizes, or `MemAvailable` larger than `MemTotal` make only the RAM metric unavailable.
+
 ## Failure handling
 
-An expected failed sample becomes unavailable immediately. Every successful value has an absolute four-second freshness limit, so intervals from five through ten seconds intentionally have a short unavailable gap before their next sample.
+An expected failed sample becomes unavailable immediately. Every successful CPU or RAM value has an absolute four-second freshness limit, so intervals from five through ten seconds intentionally have a short unavailable gap before their next sample.
 
 The session validates the helper protocol and supervises the process. A crash restarts with `1, 2, 4, 8, 16, 30, 30 …` second backoff, reset after 60 seconds of stable operation. A helper that misses its scheduled result by two seconds is terminated before a replacement can start. The shared source state exposes the error, last successful sample, and next restart time.
 
@@ -38,7 +39,7 @@ make build
 make test
 ```
 
-Tests exercise CPU behavior through the public `SystemStatsSession.current` and `configure(...)` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke test instantiates two callers against one service, then inspects the live process tree to verify that only one single-threaded helper and scheduler exist.
+Tests exercise CPU and RAM behavior through the public `SystemStatsSession.current` and `configure(...)` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke test verifies both RAM formats, stable reserved width, and two callers sharing one single-threaded helper and scheduler.
 
 ## License
 
