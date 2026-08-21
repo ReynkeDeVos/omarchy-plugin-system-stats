@@ -48,9 +48,15 @@ ShellRoot {
                   caseName + " total bytes")) return
       if (!verify(snapshot.ram.sampledAtMs === snapshot.publishedAtMs,
                   caseName + " shared observation timestamp")) return
+      if (!verify(snapshot.ram.window
+                  && snapshot.ram.window.actualMs > 0,
+                  caseName + " RAM observation window")) return
       if (expectedCpuStatus === "available"
           && !verify(snapshot.ram.sampledAtMs === snapshot.cpu.sampledAtMs,
                      caseName + " atomic CPU and RAM timestamp")) return
+      if (expectedCpuStatus === "available"
+          && !verify(snapshot.ram.window.actualMs === snapshot.cpu.window.actualMs,
+                     caseName + " shared CPU and RAM window")) return
       if (!verify(snapshot.ram.evidence === "fixtureTested", caseName + " RAM evidence")) return
       if (!verify(snapshot.ram.path === "proc-meminfo", caseName + " RAM path")) return
       if (!verify(Object.isFrozen(snapshot.ram.value), caseName + " RAM value immutability")) return
