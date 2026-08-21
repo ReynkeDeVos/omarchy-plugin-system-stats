@@ -402,8 +402,9 @@ static bool cpu_percent(const CpuCounters *before, const CpuCounters *after,
   return true;
 }
 
-static HostSampler host_sampler_create(const Options *options) {
-  HostSampler sampler = {
+static struct timespec host_sampler_start(HostSampler *sampler,
+                                          const Options *options) {
+  *sampler = (HostSampler){
       .cpu_frames = options->frames_path == NULL
                         ? NULL
                         : fopen(options->frames_path, "re"),
@@ -411,15 +412,15 @@ static HostSampler host_sampler_create(const Options *options) {
                             ? NULL
                             : fopen(options->meminfo_frames_path, "re"),
   };
-  if (options->frames_path != NULL && sampler.cpu_frames == NULL)
+  if (options->frames_path != NULL && sampler->cpu_frames == NULL)
     fail("could not open fixture frames");
-  if (options->meminfo_frames_path != NULL && sampler.meminfo_frames == NULL)
+  if (options->meminfo_frames_path != NULL && sampler->meminfo_frames == NULL)
     fail("could not open memory fixture frames");
 
-  sampler.previous_cpu_result =
-      read_counters(sampler.cpu_frames, &sampler.previous_cpu);
-  sampler.baseline_at = monotonic_now();
-  return sampler;
+  sampler->previous_cpu_result =
+      read_counters(sampler->cpu_frames, &sampler->previous_cpu);
+  sampler->baseline_at = monotonic_now();
+  return sampler->baseline_at;
 }
 
 static struct timespec host_sampler_reset(HostSampler *sampler) {
@@ -429,7 +430,11 @@ static struct timespec host_sampler_reset(HostSampler *sampler) {
   return sampler->baseline_at;
 }
 
-static HostObservation host_sampler_observe(HostSampler *sampler) {
+static HostObservation host_sampler_observe(HostSampler *sampler,
+                                            struct timespec deadline) {
+  if (compare_timespec(deadline, sampler->baseline_at) <= 0)
+    fail("host sampler deadline must follow its CPU baseline");
+
   CpuCounters current_cpu = {0};
   ParseResult current_cpu_result =
       read_counters(sampler->cpu_frames, &current_cpu);
@@ -592,10 +597,10 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
 
 int main(int argc, char **argv) {
   Options options = parse_options(argc, argv);
-  HostSampler host_sampler = host_sampler_create(&options);
-  struct timespec deadline =
-      add_ms(host_sampler.baseline_at, options.interval_ms);
-  int64_t started_at_ms = monotonic_ms(host_sampler.baseline_at);
+  HostSampler host_sampler = {0};
+  struct timespec initialized_at = host_sampler_start(&host_sampler, &options);
+  struct timespec deadline = add_ms(initialized_at, options.interval_ms);
+  int64_t started_at_ms = monotonic_ms(initialized_at);
   uint64_t generation = new_generation();
   uint64_t sequence = 0;
   uint64_t config_revision = 0;
@@ -652,13 +657,13 @@ int main(int argc, char **argv) {
 
       options.interval_ms = command.interval_seconds * options.second_ms;
       config_revision = command.config_revision;
-      struct timespec initialized_at = host_sampler_reset(&host_sampler);
-      deadline = add_ms(initialized_at, options.interval_ms);
+      struct timespec reset_at = host_sampler_reset(&host_sampler);
+      deadline = add_ms(reset_at, options.interval_ms);
       cpu_failure.code = NULL;
       ram_failure.code = NULL;
       emit_ack(generation, &command);
       emit_initializing_snapshot(generation, ++sequence, config_revision,
-                                 monotonic_ms(initialized_at), started_at_ms);
+                                 monotonic_ms(reset_at), started_at_ms);
       free(line);
       continue;
     }
@@ -668,7 +673,7 @@ int main(int argc, char **argv) {
       continue;
     }
 
-    HostObservation observation = host_sampler_observe(&host_sampler);
+    HostObservation observation = host_sampler_observe(&host_sampler, deadline);
 
     if (host_sampler_fixture_exhausted(&host_sampler)) {
       for (;;)

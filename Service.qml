@@ -206,6 +206,26 @@ Item {
     return -1
   }
 
+  function _normalizeMetric(metric, scope, pathId, receivedAtMs,
+                            stateStartedAtMs, lastSuccessfulAt) {
+    var normalized = metric
+    if (metric.status === "available") {
+      lastSuccessfulAt = metric.sampledAtMs
+      if (_helperNowMs() - lastSuccessfulAt >= 4 * _secondMs) {
+        normalized = _unavailableMetric("stale", scope, pathId,
+                                        _helperNowMs(), lastSuccessfulAt)
+      }
+    } else {
+      stateStartedAtMs = receivedAtMs
+      normalized = _withLastSuccess(metric, lastSuccessfulAt)
+    }
+    return {
+      metric: normalized,
+      stateStartedAtMs: stateStartedAtMs,
+      lastSuccessfulAt: lastSuccessfulAt
+    }
+  }
+
   function _phaseForMetrics(cpu, ram) {
     if (cpu.status === "initializing" && ram.status === "initializing") return "initializing"
     return cpu.status === "available" && ram.status === "available" ? "live" : "degraded"
@@ -469,28 +489,18 @@ Item {
 
     var receivedAtMs = _nowMs()
     _observeHelperClock(message.publishedAtMs, receivedAtMs)
-    var cpuMetric = message.cpu
-    if (cpuMetric.status === "available") {
-      _lastCpuSuccessfulAt = cpuMetric.sampledAtMs
-      if (_helperNowMs() - _lastCpuSuccessfulAt >= 4 * _secondMs) {
-        cpuMetric = _unavailableMetric("stale", "cpu", "proc-stat",
-                                       _helperNowMs(), _lastCpuSuccessfulAt)
-      }
-    } else {
-      _cpuStateStartedAtMs = receivedAtMs
-      cpuMetric = _withLastSuccess(cpuMetric, _lastCpuSuccessfulAt)
-    }
-    var ramMetric = message.ram
-    if (ramMetric.status === "available") {
-      _lastRamSuccessfulAt = ramMetric.sampledAtMs
-      if (_helperNowMs() - _lastRamSuccessfulAt >= 4 * _secondMs) {
-        ramMetric = _unavailableMetric("stale", "ram", "proc-meminfo",
-                                       _helperNowMs(), _lastRamSuccessfulAt)
-      }
-    } else {
-      _ramStateStartedAtMs = receivedAtMs
-      ramMetric = _withLastSuccess(ramMetric, _lastRamSuccessfulAt)
-    }
+    var cpuLifecycle = _normalizeMetric(message.cpu, "cpu", "proc-stat",
+                                        receivedAtMs, _cpuStateStartedAtMs,
+                                        _lastCpuSuccessfulAt)
+    var ramLifecycle = _normalizeMetric(message.ram, "ram", "proc-meminfo",
+                                        receivedAtMs, _ramStateStartedAtMs,
+                                        _lastRamSuccessfulAt)
+    var cpuMetric = cpuLifecycle.metric
+    var ramMetric = ramLifecycle.metric
+    _cpuStateStartedAtMs = cpuLifecycle.stateStartedAtMs
+    _ramStateStartedAtMs = ramLifecycle.stateStartedAtMs
+    _lastCpuSuccessfulAt = cpuLifecycle.lastSuccessfulAt
+    _lastRamSuccessfulAt = ramLifecycle.lastSuccessfulAt
     if (message.phase !== "initializing") {
       _expectedSampleAtMs = receivedAtMs + _intervalSeconds * _secondMs
     }
