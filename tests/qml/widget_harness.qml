@@ -9,6 +9,9 @@ ShellRoot {
   property bool ready: false
   property real screenAWidth: 0
   property real screenBWidth: 0
+  property int inventoryRevisionBeforeOpen: 0
+  property bool pickerOpened: false
+  readonly property string fixedGpuId: "nvidia:GPU-22222222-2222-2222-2222-222222222222"
 
   function checkGiBFormats() {
     if (!verify(screenA.snapshotSequence === 1, "screen A format switch reuses snapshot")) return
@@ -29,6 +32,40 @@ ShellRoot {
     if (!verify(screenA.ramDisplayValue === "63", "fallback RAM percentage")) return
     if (!verify(screenA.implicitWidth === screenAWidth, "fallback keeps reserved width")) return
 
+    inventoryRevisionBeforeOpen = session.gpuInventory.revision
+    screenA.open()
+    if (!verify(screenA.opened, "left-click action opens detail panel")) return
+    if (!verify(!screenB.opened, "panel remains local to one screen")) return
+    pickerOpened = true
+    checkPicker()
+  }
+
+  function checkPicker() {
+    if (!pickerOpened || session.gpuInventory.revision <= inventoryRevisionBeforeOpen) return
+    if (!verify(screenA.gpuOptions.length === 3, "picker contains Auto and every device")) return
+    if (!verify(screenA.gpuOptions[0].value === "auto", "Auto is first picker option")) return
+    if (!verify(screenA.gpuOptions[1].label.indexOf(screenA.gpuOptions[1].value) !== -1,
+                "device option shows stable identity")) return
+    if (!verify(screenA.selectedGpuDevice !== null
+                && screenA.selectedGpuDevice.stableId === "pci:0000:00:02.0",
+                "Auto exposes the active GPU details")) return
+    screenA.selectGpu("pci:0000:ff:00.0")
+    if (!verify(fakeBarA.persistenceCount === 0,
+                "stale picker identity is not persisted")) return
+    screenA.selectGpu(fixedGpuId)
+    pickerOpened = false
+  }
+
+  function checkPersistedSelection(snapshot) {
+    if (snapshot.selection.mode !== "fixed" || snapshot.selection.status !== "selected") return
+    if (!verify(snapshot.selection.stableId === fixedGpuId, "picker configures fixed identity")) return
+    if (!verify(fakeBarA.persistenceCount === 1, "picker writes through Omarchy settings once")) return
+    if (!verify(fakeBarA.persistedGpuSelection.mode === "fixed", "fixed mode persisted")) return
+    if (!verify(fakeBarA.persistedGpuSelection.stableId === fixedGpuId,
+                "stable identity persisted")) return
+    if (!verify(fakeBarA.persistedGpuSelection.card === undefined
+                && fakeBarA.persistedGpuSelection.index === undefined,
+                "unstable indices are not persisted")) return
     ready = true
     console.log("TEST-READY: two widgets share one session")
     finishTimer.start()
@@ -82,7 +119,11 @@ ShellRoot {
 
   Connections {
     target: session
-    function onCurrentChanged() { testRoot.checkWidgets(session.current) }
+    function onCurrentChanged() {
+      testRoot.checkWidgets(session.current)
+      testRoot.checkPersistedSelection(session.current)
+    }
+    function onGpuInventoryChanged() { testRoot.checkPicker() }
   }
 
   FakeBar {

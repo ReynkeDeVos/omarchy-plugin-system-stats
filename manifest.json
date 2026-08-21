@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "reynkedevos.system-stats",
   "name": "System Stats",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "Reynke De Vos",
-  "description": "Compact shared CPU and RAM usage for the Omarchy bar",
+  "description": "Shared CPU and RAM usage with stable GPU selection for the Omarchy bar",
   "license": "MIT",
   "kinds": [
     "service",
@@ -17,11 +17,15 @@
   },
   "barWidget": {
     "displayName": "System Stats",
-    "description": "Shared CPU and RAM usage without per-screen sampling",
+    "description": "Shared CPU and RAM usage with stable GPU selection",
     "category": "System",
     "allowMultiple": false,
     "defaults": {
-      "ramDisplayFormat": "percent"
+      "ramDisplayFormat": "percent",
+      "gpuSelection": {
+        "mode": "auto",
+        "configRevision": 0
+      }
     },
     "schema": [
       {

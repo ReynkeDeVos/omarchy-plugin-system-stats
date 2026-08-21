@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include "gpu-inventory.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -33,6 +35,11 @@ typedef struct {
 typedef struct {
   const char *frames_path;
   const char *meminfo_frames_path;
+  const char *gpu_inventory_path;
+  const char *gpu_presence_path;
+  const char *drm_root;
+  const char *nvidia_root;
+  const char *udev_data_root;
   long interval_ms;
   long second_ms;
 } Options;
@@ -42,7 +49,19 @@ typedef struct {
   uint64_t command_id;
   uint64_t config_revision;
   long interval_seconds;
+  GpuSelectionMode gpu_selection_mode;
+  char gpu_stable_id[GPU_STABLE_ID_SIZE];
+  bool resumes_gpu_session;
+  GpuSelectionStatus resume_auto_status;
+  char resume_auto_stable_id[GPU_STABLE_ID_SIZE];
+  int resume_fixed_retry_stage;
+  int64_t resume_fixed_retry_at_ms;
 } ConfigureCommand;
+
+typedef struct {
+  uint64_t generation;
+  uint64_t command_id;
+} RefreshGpuInventoryCommand;
 
 typedef struct {
   const char *code;
@@ -89,6 +108,11 @@ static void fail(const char *message) {
 static Options parse_options(int argc, char **argv) {
   const char *frames_path = getenv("SYSTEM_STATS_FRAMES");
   const char *meminfo_frames_path = getenv("SYSTEM_STATS_MEMINFO_FRAMES");
+  const char *gpu_inventory_path = getenv("SYSTEM_STATS_GPU_INVENTORY_FILE");
+  const char *gpu_presence_path = getenv("SYSTEM_STATS_GPU_PRESENCE_FILE");
+  const char *drm_root = getenv("SYSTEM_STATS_DRM_ROOT");
+  const char *nvidia_root = getenv("SYSTEM_STATS_NVIDIA_ROOT");
+  const char *udev_data_root = getenv("SYSTEM_STATS_UDEV_DATA_ROOT");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
   const char *second_text = getenv("SYSTEM_STATS_SECOND_MS");
   Options options = {
@@ -98,6 +122,22 @@ static Options parse_options(int argc, char **argv) {
           meminfo_frames_path != NULL && *meminfo_frames_path != '\0'
               ? meminfo_frames_path
               : NULL,
+      .gpu_inventory_path =
+          gpu_inventory_path != NULL && *gpu_inventory_path != '\0'
+              ? gpu_inventory_path
+              : NULL,
+      .gpu_presence_path =
+          gpu_presence_path != NULL && *gpu_presence_path != '\0'
+              ? gpu_presence_path
+              : NULL,
+      .drm_root =
+          drm_root != NULL && *drm_root != '\0' ? drm_root : "/sys/class/drm",
+      .nvidia_root = nvidia_root != NULL && *nvidia_root != '\0'
+                         ? nvidia_root
+                         : "/proc/driver/nvidia/gpus",
+      .udev_data_root = udev_data_root != NULL && *udev_data_root != '\0'
+                            ? udev_data_root
+                            : "/run/udev/data",
       .interval_ms = 2000,
       .second_ms = 1000,
   };
@@ -476,12 +516,28 @@ static void emit_hello(uint64_t generation, int64_t published_at_ms) {
   fflush(stdout);
 }
 
-static void emit_ack(uint64_t generation, const ConfigureCommand *command) {
+static void emit_configure_ack(uint64_t generation,
+                               const ConfigureCommand *command,
+                               const GpuInventoryManager *gpu_inventory) {
   printf("{\"type\":\"ack\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"commandId\":%" PRIu64 ",\"configRevision\":%" PRIu64
-         ",\"intervalSeconds\":%ld}\n",
+         ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":\"%s\"",
          generation, command->command_id, command->config_revision,
-         command->interval_seconds);
+         command->interval_seconds,
+         gpu_selection_mode_name(command->gpu_selection_mode));
+  if (command->gpu_selection_mode == GPU_SELECTION_FIXED)
+    printf(",\"stableId\":\"%s\"", command->gpu_stable_id);
+  fputs("},\"gpuState\":", stdout);
+  gpu_inventory_emit_state(gpu_inventory);
+  fputs("}\n", stdout);
+  fflush(stdout);
+}
+
+static void emit_refresh_ack(uint64_t generation,
+                             const RefreshGpuInventoryCommand *command) {
+  printf("{\"type\":\"ack\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         ",\"commandId\":%" PRIu64 ",\"command\":\"refreshGpuInventory\"}\n",
+         generation, command->command_id);
   fflush(stdout);
 }
 
@@ -493,35 +549,146 @@ static void emit_reject(uint64_t generation, uint64_t command_id) {
 }
 
 static bool parse_configure(char *line, ConfigureCommand *command) {
+  char mode[16] = {0};
+  char auto_status[16] = {0};
+  char stable_id[GPU_STABLE_ID_SIZE] = {0};
   int consumed = 0;
   int matched =
       sscanf(line,
              "{\"type\":\"configure\",\"schemaVersion\":1,\"generation\":"
              "%" SCNu64 ",\"commandId\":%" SCNu64 ",\"configRevision\":%" SCNu64
-             ",\"intervalSeconds\":%ld}%n",
+             ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":\"%15[a-z]"
+             "\",\"stableId\":\"%127[0-9A-Za-z:.-]\"},\"gpuResume\":{"
+             "\"fixedRetryStage\":%d,\"fixedRetryAt\":%" SCNd64 "}}%n",
              &command->generation, &command->command_id,
-             &command->config_revision, &command->interval_seconds, &consumed);
-  if (matched != 4)
+             &command->config_revision, &command->interval_seconds, mode,
+             stable_id, &command->resume_fixed_retry_stage,
+             &command->resume_fixed_retry_at_ms, &consumed);
+  bool fixed_resume_valid = matched == 8 && strcmp(mode, "fixed") == 0 &&
+                            gpu_stable_id_valid(stable_id) &&
+                            command->resume_fixed_retry_stage >= 0 &&
+                            command->resume_fixed_retry_stage <= 3 &&
+                            ((command->resume_fixed_retry_stage == 3 &&
+                              command->resume_fixed_retry_at_ms == -1) ||
+                             (command->resume_fixed_retry_stage == 0 &&
+                              command->resume_fixed_retry_at_ms == -1) ||
+                             (command->resume_fixed_retry_stage < 3 &&
+                              command->resume_fixed_retry_at_ms >= 0));
+  if (fixed_resume_valid) {
+    command->gpu_selection_mode = GPU_SELECTION_FIXED;
+    command->resumes_gpu_session = true;
+    snprintf(command->gpu_stable_id, sizeof(command->gpu_stable_id), "%s",
+             stable_id);
+  } else {
+    *command = (ConfigureCommand){0};
+    memset(mode, 0, sizeof(mode));
+    memset(stable_id, 0, sizeof(stable_id));
+    consumed = 0;
+    matched = sscanf(
+        line,
+        "{\"type\":\"configure\",\"schemaVersion\":1,\"generation\":"
+        "%" SCNu64 ",\"commandId\":%" SCNu64 ",\"configRevision\":%" SCNu64
+        ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":\"%15[a-z]"
+        "\"},\"gpuResume\":{\"autoStatus\":\"%15[a-z]\","
+        "\"stableId\":\"%127[0-9A-Za-z:.-]\"}}%n",
+        &command->generation, &command->command_id, &command->config_revision,
+        &command->interval_seconds, mode, auto_status, stable_id, &consumed);
+    if (matched == 7 && strcmp(mode, "auto") == 0 &&
+        strcmp(auto_status, "selected") == 0 &&
+        gpu_stable_id_valid(stable_id)) {
+      command->gpu_selection_mode = GPU_SELECTION_AUTO;
+      command->resumes_gpu_session = true;
+      command->resume_auto_status = GPU_SELECTION_SELECTED;
+      snprintf(command->resume_auto_stable_id,
+               sizeof(command->resume_auto_stable_id), "%s", stable_id);
+    } else {
+      *command = (ConfigureCommand){0};
+      memset(mode, 0, sizeof(mode));
+      memset(auto_status, 0, sizeof(auto_status));
+      memset(stable_id, 0, sizeof(stable_id));
+      consumed = 0;
+      matched = sscanf(
+          line,
+          "{\"type\":\"configure\",\"schemaVersion\":1,\"generation\":"
+          "%" SCNu64 ",\"commandId\":%" SCNu64 ",\"configRevision\":%" SCNu64
+          ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":\"%15[a-z]"
+          "\"},\"gpuResume\":{\"autoStatus\":\"%15[a-z]\"}}%n",
+          &command->generation, &command->command_id, &command->config_revision,
+          &command->interval_seconds, mode, auto_status, &consumed);
+      bool empty_auto_resume = matched == 6 && strcmp(mode, "auto") == 0 &&
+                               (strcmp(auto_status, "none") == 0 ||
+                                strcmp(auto_status, "required") == 0);
+      if (empty_auto_resume) {
+        command->gpu_selection_mode = GPU_SELECTION_AUTO;
+        command->resumes_gpu_session = true;
+        command->resume_auto_status = strcmp(auto_status, "required") == 0
+                                          ? GPU_SELECTION_REQUIRED
+                                          : GPU_SELECTION_NONE;
+      } else {
+        *command = (ConfigureCommand){0};
+        memset(mode, 0, sizeof(mode));
+        memset(stable_id, 0, sizeof(stable_id));
+        consumed = 0;
+        matched = sscanf(
+            line,
+            "{\"type\":\"configure\",\"schemaVersion\":1,\"generation\":"
+            "%" SCNu64 ",\"commandId\":%" SCNu64 ",\"configRevision\":%" SCNu64
+            ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":\"%15[a-z]"
+            "\",\"stableId\":\"%127[0-9A-Za-z:.-]\"}}%n",
+            &command->generation, &command->command_id,
+            &command->config_revision, &command->interval_seconds, mode,
+            stable_id, &consumed);
+        if (matched == 6 && strcmp(mode, "fixed") == 0 &&
+            gpu_stable_id_valid(stable_id)) {
+          command->gpu_selection_mode = GPU_SELECTION_FIXED;
+          snprintf(command->gpu_stable_id, sizeof(command->gpu_stable_id), "%s",
+                   stable_id);
+        } else {
+          *command = (ConfigureCommand){0};
+          memset(mode, 0, sizeof(mode));
+          consumed = 0;
+          matched =
+              sscanf(line,
+                     "{\"type\":\"configure\",\"schemaVersion\":1,"
+                     "\"generation\":%" SCNu64 ",\"commandId\":%" SCNu64
+                     ",\"configRevision\":%" SCNu64
+                     ",\"intervalSeconds\":%ld,\"gpuSelection\":{\"mode\":"
+                     "\"%15[a-z]\"}}%n",
+                     &command->generation, &command->command_id,
+                     &command->config_revision, &command->interval_seconds,
+                     mode, &consumed);
+          if (matched != 5 || strcmp(mode, "auto") != 0)
+            return false;
+          command->gpu_selection_mode = GPU_SELECTION_AUTO;
+        }
+      }
+    }
+  }
+  while (isspace((unsigned char)line[consumed]))
+    consumed++;
+  return line[consumed] == '\0';
+}
+
+static bool parse_refresh_gpu_inventory(char *line,
+                                        RefreshGpuInventoryCommand *command) {
+  int consumed = 0;
+  int matched =
+      sscanf(line,
+             "{\"type\":\"refreshGpuInventory\",\"schemaVersion\":1,"
+             "\"generation\":%" SCNu64 ",\"commandId\":%" SCNu64 "}%n",
+             &command->generation, &command->command_id, &consumed);
+  if (matched != 2)
     return false;
   while (isspace((unsigned char)line[consumed]))
     consumed++;
   return line[consumed] == '\0';
 }
 
-static void emit_unavailable_gpu(int64_t unavailable_since_ms) {
-  printf(",\"gpu\":{\"status\":\"unavailable\","
-         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
-         "\"retryability\":\"nonRetryable\","
-         "\"diagnostic\":\"metric provider is outside the CPU and RAM "
-         "slice\"},\"since\":%" PRId64 "},"
-         "\"source\":{\"status\":\"running\"}}\n",
-         unavailable_since_ms);
-}
-
 static void emit_initializing_snapshot(uint64_t generation, uint64_t sequence,
                                        uint64_t config_revision,
                                        int64_t initialized_at_ms,
-                                       int64_t unavailable_since_ms) {
+                                       GpuInventoryManager *gpu_inventory,
+                                       struct timespec now) {
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
          ",\"phase\":\"initializing\",\"publishedAtMs\":%" PRId64
@@ -529,16 +696,17 @@ static void emit_initializing_snapshot(uint64_t generation, uint64_t sequence,
          "\"ram\":{\"status\":\"initializing\",\"since\":%" PRId64 "}",
          generation, sequence, config_revision, initialized_at_ms,
          initialized_at_ms, initialized_at_ms);
-  emit_unavailable_gpu(unavailable_since_ms);
+  gpu_inventory_emit_snapshot_fields(gpu_inventory, now);
+  fputs(",\"source\":{\"status\":\"running\"}}\n", stdout);
   fflush(stdout);
 }
 
 static void emit_snapshot(uint64_t generation, uint64_t sequence,
                           uint64_t config_revision,
-                          int64_t unavailable_since_ms,
                           const HostObservation *observation,
                           MetricFailureState *cpu_failure,
-                          MetricFailureState *ram_failure) {
+                          MetricFailureState *ram_failure,
+                          GpuInventoryManager *gpu_inventory) {
   int64_t sampled_at_ms = monotonic_ms(observation->sampled_at);
   if (observation->cpu_available) {
     cpu_failure->code = NULL;
@@ -591,24 +759,41 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
            "\"since\":%" PRId64 "}",
            observation->ram_error, ram_failure->since_ms);
   }
-  emit_unavailable_gpu(unavailable_since_ms);
+  gpu_inventory_emit_snapshot_fields(gpu_inventory, observation->sampled_at);
+  fputs(",\"source\":{\"status\":\"running\"}}\n", stdout);
   fflush(stdout);
 }
 
 int main(int argc, char **argv) {
+  if (setvbuf(stdin, NULL, _IONBF, 0) != 0)
+    fail("could not configure command input");
   Options options = parse_options(argc, argv);
   HostSampler host_sampler = {0};
   struct timespec initialized_at = host_sampler_start(&host_sampler, &options);
   struct timespec deadline = add_ms(initialized_at, options.interval_ms);
-  int64_t started_at_ms = monotonic_ms(initialized_at);
   uint64_t generation = new_generation();
   uint64_t sequence = 0;
   uint64_t config_revision = 0;
   MetricFailureState cpu_failure = {0};
   MetricFailureState ram_failure = {0};
+  GpuInventoryManager gpu_inventory = {0};
   bool accepts_commands = true;
 
+  GpuInventoryOptions gpu_options = {
+      .fixture_inventory_path = options.gpu_inventory_path,
+      .fixture_presence_path = options.gpu_presence_path,
+      .drm_root = options.drm_root,
+      .nvidia_root = options.nvidia_root,
+      .udev_data_root = options.udev_data_root,
+      .second_ms = options.second_ms,
+  };
+  gpu_inventory_manager_init(&gpu_inventory, &gpu_options);
+  struct timespec inventory_started_at = monotonic_now();
+  gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_SESSION_START,
+                          inventory_started_at);
+
   emit_hello(generation, monotonic_ms(monotonic_now()));
+  gpu_inventory_emit(&gpu_inventory, generation);
 
   for (;;) {
     struct timespec now = monotonic_now();
@@ -618,7 +803,9 @@ int main(int argc, char **argv) {
     };
     int poll_result;
     do {
-      poll_result = poll(&input, 1, milliseconds_until(deadline, now));
+      int timeout = milliseconds_until(deadline, now);
+      timeout = gpu_inventory_poll_timeout(&gpu_inventory, now, timeout);
+      poll_result = poll(&input, 1, timeout);
     } while (poll_result < 0 && errno == EINTR);
     if (poll_result < 0)
       fail("could not wait for sampler deadline");
@@ -633,37 +820,81 @@ int main(int argc, char **argv) {
         continue;
       }
 
+      RefreshGpuInventoryCommand refresh = {0};
+      bool refresh_parsed = length <= MAX_COMMAND_BYTES &&
+                            parse_refresh_gpu_inventory(line, &refresh);
+      if (refresh_parsed) {
+        if (refresh.generation != generation || refresh.command_id == 0) {
+          emit_reject(generation, refresh.command_id);
+        } else {
+          struct timespec refreshed_at = monotonic_now();
+          gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_PICKER,
+                                  refreshed_at);
+          gpu_inventory_emit(&gpu_inventory, generation);
+          emit_refresh_ack(generation, &refresh);
+        }
+        free(line);
+        continue;
+      }
+
       ConfigureCommand command = {0};
       bool parsed =
           length <= MAX_COMMAND_BYTES && parse_configure(line, &command);
+      bool same_selection =
+          command.gpu_selection_mode == gpu_inventory.mode &&
+          (command.gpu_selection_mode == GPU_SELECTION_AUTO ||
+           strcmp(command.gpu_stable_id, gpu_inventory.fixed_stable_id) == 0);
       if (!parsed || command.generation != generation ||
           command.command_id == 0 ||
           command.config_revision < config_revision ||
           command.interval_seconds < 2 || command.interval_seconds > 10 ||
           command.interval_seconds > LONG_MAX / options.second_ms ||
           (command.config_revision == config_revision &&
-           command.interval_seconds * options.second_ms !=
-               options.interval_ms)) {
+           (command.interval_seconds * options.second_ms !=
+                options.interval_ms ||
+            !same_selection))) {
         emit_reject(generation, command.command_id);
         free(line);
         continue;
       }
 
       if (command.config_revision == config_revision) {
-        emit_ack(generation, &command);
+        if (command.resumes_gpu_session) {
+          gpu_inventory_restore_session(
+              &gpu_inventory, command.gpu_selection_mode, command.gpu_stable_id,
+              command.resume_auto_status, command.resume_auto_stable_id,
+              command.resume_fixed_retry_stage,
+              command.resume_fixed_retry_at_ms, monotonic_now());
+        }
+        emit_configure_ack(generation, &command, &gpu_inventory);
         free(line);
         continue;
       }
 
-      options.interval_ms = command.interval_seconds * options.second_ms;
+      bool interval_changed =
+          command.interval_seconds * options.second_ms != options.interval_ms;
+      if (command.resumes_gpu_session) {
+        gpu_inventory_restore_session(
+            &gpu_inventory, command.gpu_selection_mode, command.gpu_stable_id,
+            command.resume_auto_status, command.resume_auto_stable_id,
+            command.resume_fixed_retry_stage, command.resume_fixed_retry_at_ms,
+            monotonic_now());
+      } else {
+        gpu_inventory_set_selection(&gpu_inventory, command.gpu_selection_mode,
+                                    command.gpu_stable_id, monotonic_now());
+      }
       config_revision = command.config_revision;
-      struct timespec reset_at = host_sampler_reset(&host_sampler);
-      deadline = add_ms(reset_at, options.interval_ms);
-      cpu_failure.code = NULL;
-      ram_failure.code = NULL;
-      emit_ack(generation, &command);
-      emit_initializing_snapshot(generation, ++sequence, config_revision,
-                                 monotonic_ms(reset_at), started_at_ms);
+      emit_configure_ack(generation, &command, &gpu_inventory);
+      if (interval_changed) {
+        options.interval_ms = command.interval_seconds * options.second_ms;
+        struct timespec reset_at = host_sampler_reset(&host_sampler);
+        deadline = add_ms(reset_at, options.interval_ms);
+        cpu_failure.code = NULL;
+        ram_failure.code = NULL;
+        emit_initializing_snapshot(generation, ++sequence, config_revision,
+                                   monotonic_ms(reset_at), &gpu_inventory,
+                                   reset_at);
+      }
       free(line);
       continue;
     }
@@ -673,6 +904,19 @@ int main(int argc, char **argv) {
       continue;
     }
 
+    now = monotonic_now();
+    if (gpu_inventory_retry_due(&gpu_inventory, now)) {
+      gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_RETRY, now);
+      gpu_inventory_emit(&gpu_inventory, generation);
+      continue;
+    }
+
+    if (gpu_inventory.status == GPU_SELECTION_SELECTED &&
+        !gpu_inventory_selected_present(&gpu_inventory)) {
+      gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_DISAPPEARANCE, now);
+      gpu_inventory_emit(&gpu_inventory, generation);
+    }
+
     HostObservation observation = host_sampler_observe(&host_sampler, deadline);
 
     if (host_sampler_fixture_exhausted(&host_sampler)) {
@@ -680,8 +924,8 @@ int main(int argc, char **argv) {
         pause();
     }
 
-    emit_snapshot(generation, ++sequence, config_revision, started_at_ms,
-                  &observation, &cpu_failure, &ram_failure);
+    emit_snapshot(generation, ++sequence, config_revision, &observation,
+                  &cpu_failure, &ram_failure, &gpu_inventory);
 
     deadline = add_ms(deadline, options.interval_ms);
     if (compare_timespec(deadline, observation.sampled_at) <= 0)
