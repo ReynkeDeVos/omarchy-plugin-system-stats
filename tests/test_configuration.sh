@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+test_dir=$(mktemp -d)
+
+cleanup() {
+  if [[ -d $test_dir ]]; then rm -rf -- "$test_dir"; fi
+}
+trap cleanup EXIT
+
+mkdir -p "$test_dir/bin" "$test_dir/fixtures/cpu"
+cp "$repo_root/Service.qml" "$test_dir/Service.qml"
+cp "$repo_root/tests/qml/configuration_harness.qml" "$test_dir/shell.qml"
+cp "$repo_root/bin/system-stats-helper" "$test_dir/bin/system-stats-helper"
+cp "$repo_root/tests/fixtures/cpu/reconfigure.stat" "$test_dir/fixtures/cpu/reconfigure.stat"
+
+output=$(SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/reconfigure.stat" \
+  SYSTEM_STATS_SECOND_MS=12 \
+  QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
+  printf '%s\n' "$output"
+  exit 1
+}
+
+printf '%s\n' "$output"
+grep -Fq "TEST-PASS: interval configuration uses complete live windows" <<<"$output"

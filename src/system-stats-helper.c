@@ -3,7 +3,9 @@
 #include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <math.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -13,7 +15,7 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { CPU_FIELD_COUNT = 8 };
+enum { CPU_FIELD_COUNT = 8, MAX_COMMAND_BYTES = 65536 };
 
 typedef struct {
   uint64_t user;
@@ -29,7 +31,15 @@ typedef struct {
 typedef struct {
   const char *frames_path;
   long interval_ms;
+  long second_ms;
 } Options;
+
+typedef struct {
+  uint64_t generation;
+  uint64_t command_id;
+  uint64_t config_revision;
+  long interval_seconds;
+} ConfigureCommand;
 
 typedef struct {
   const char *code;
@@ -51,11 +61,25 @@ static void fail(const char *message) {
 static Options parse_options(int argc, char **argv) {
   const char *frames_path = getenv("SYSTEM_STATS_FRAMES");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
+  const char *second_text = getenv("SYSTEM_STATS_SECOND_MS");
   Options options = {
       .frames_path =
           frames_path != NULL && *frames_path != '\0' ? frames_path : NULL,
       .interval_ms = 2000,
+      .second_ms = 1000,
   };
+
+  if (second_text != NULL && *second_text != '\0') {
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(second_text, &end, 10);
+    if (errno != 0 || end == second_text || *end != '\0' || value <= 0 ||
+        value > LONG_MAX / 10) {
+      fail("SYSTEM_STATS_SECOND_MS must be a positive integer");
+    }
+    options.second_ms = value;
+    options.interval_ms = 2 * value;
+  }
 
   if (interval_text != NULL && *interval_text != '\0') {
     char *end = NULL;
@@ -183,13 +207,20 @@ static int compare_timespec(struct timespec left, struct timespec right) {
   return left.tv_nsec < right.tv_nsec ? -1 : 1;
 }
 
-static void sleep_until(struct timespec deadline) {
-  int result;
-  do {
-    result = clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &deadline, NULL);
-  } while (result == EINTR);
-  if (result != 0)
-    fail("monotonic timer failed");
+static struct timespec monotonic_now(void) {
+  struct timespec now;
+  if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+    fail("could not read monotonic clock");
+  return now;
+}
+
+static int milliseconds_until(struct timespec deadline, struct timespec now) {
+  int64_t nanoseconds = (int64_t)(deadline.tv_sec - now.tv_sec) * 1000000000LL +
+                        deadline.tv_nsec - now.tv_nsec;
+  if (nanoseconds <= 0)
+    return 0;
+  int64_t milliseconds = (nanoseconds + 999999LL) / 1000000LL;
+  return milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
 }
 
 static const char *parse_error(ParseResult result) {
@@ -226,16 +257,77 @@ static bool cpu_percent(const CpuCounters *before, const CpuCounters *after,
   return true;
 }
 
-static void emit_hello(uint64_t generation) {
+static void emit_hello(uint64_t generation, int64_t published_at_ms) {
   printf("{\"type\":\"hello\",\"schemaVersion\":1,\"generation\":%" PRIu64
-         "}\n",
-         generation);
+         ",\"publishedAtMs\":%" PRId64 "}\n",
+         generation, published_at_ms);
+  fflush(stdout);
+}
+
+static void emit_ack(uint64_t generation, const ConfigureCommand *command) {
+  printf("{\"type\":\"ack\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         ",\"commandId\":%" PRIu64 ",\"configRevision\":%" PRIu64
+         ",\"intervalSeconds\":%ld}\n",
+         generation, command->command_id, command->config_revision,
+         command->interval_seconds);
+  fflush(stdout);
+}
+
+static void emit_reject(uint64_t generation, uint64_t command_id) {
+  printf("{\"type\":\"reject\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         ",\"commandId\":%" PRIu64 ",\"error\":\"invalidConfiguration\"}\n",
+         generation, command_id);
+  fflush(stdout);
+}
+
+static bool parse_configure(char *line, ConfigureCommand *command) {
+  int consumed = 0;
+  int matched =
+      sscanf(line,
+             "{\"type\":\"configure\",\"schemaVersion\":1,\"generation\":"
+             "%" SCNu64 ",\"commandId\":%" SCNu64 ",\"configRevision\":%" SCNu64
+             ",\"intervalSeconds\":%ld}%n",
+             &command->generation, &command->command_id,
+             &command->config_revision, &command->interval_seconds, &consumed);
+  if (matched != 4)
+    return false;
+  while (isspace((unsigned char)line[consumed]))
+    consumed++;
+  return line[consumed] == '\0';
+}
+
+static void emit_unavailable_dependencies(int64_t unavailable_since_ms) {
+  printf(",\"ram\":{\"status\":\"unavailable\","
+         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
+         "\"retryability\":\"nonRetryable\","
+         "\"diagnostic\":\"metric provider is outside the CPU-only "
+         "slice\"},\"since\":%" PRId64 "},"
+         "\"gpu\":{\"status\":\"unavailable\","
+         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
+         "\"retryability\":\"nonRetryable\","
+         "\"diagnostic\":\"metric provider is outside the CPU-only "
+         "slice\"},\"since\":%" PRId64 "},"
+         "\"source\":{\"status\":\"running\"}}\n",
+         unavailable_since_ms, unavailable_since_ms);
+}
+
+static void emit_initializing_snapshot(uint64_t generation, uint64_t sequence,
+                                       uint64_t config_revision,
+                                       int64_t initialized_at_ms,
+                                       int64_t unavailable_since_ms) {
+  printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
+         ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
+         ",\"phase\":\"initializing\",\"publishedAtMs\":%" PRId64
+         ",\"cpu\":{\"status\":\"initializing\",\"since\":%" PRId64 "}",
+         generation, sequence, config_revision, initialized_at_ms,
+         initialized_at_ms);
+  emit_unavailable_dependencies(unavailable_since_ms);
   fflush(stdout);
 }
 
 static void emit_snapshot(uint64_t generation, uint64_t sequence,
-                          struct timespec sampled_at, int64_t window_ms,
-                          int64_t unavailable_since_ms,
+                          uint64_t config_revision, struct timespec sampled_at,
+                          int64_t window_ms, int64_t unavailable_since_ms,
                           CpuFailureState *cpu_failure,
                           const CpuCounters *before, const CpuCounters *after,
                           ParseResult current_result,
@@ -262,9 +354,10 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
   }
 
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
-         ",\"sequence\":%" PRIu64 ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64
-         ",\"cpu\":",
-         generation, sequence, available ? "live" : "degraded", sampled_at_ms);
+         ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
+         ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64 ",\"cpu\":",
+         generation, sequence, config_revision, available ? "live" : "degraded",
+         sampled_at_ms);
   if (available) {
     printf("{\"status\":\"available\",\"value\":{\"percent\":%d,"
            "\"actualWindowMs\":%" PRId64 "},"
@@ -278,18 +371,7 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
            "\"since\":%" PRId64 "}",
            error, cpu_failure->since_ms);
   }
-  printf(",\"ram\":{\"status\":\"unavailable\","
-         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
-         "\"retryability\":\"nonRetryable\","
-         "\"diagnostic\":\"metric provider is outside the CPU-only "
-         "slice\"},\"since\":%" PRId64 "},"
-         "\"gpu\":{\"status\":\"unavailable\","
-         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
-         "\"retryability\":\"nonRetryable\","
-         "\"diagnostic\":\"metric provider is outside the CPU-only "
-         "slice\"},\"since\":%" PRId64 "},"
-         "\"source\":{\"status\":\"running\"}}\n",
-         unavailable_since_ms, unavailable_since_ms);
+  emit_unavailable_dependencies(unavailable_since_ms);
   fflush(stdout);
 }
 
@@ -302,32 +384,90 @@ int main(int argc, char **argv) {
 
   CpuCounters previous = {0};
   ParseResult previous_result = read_counters(frames, &previous);
-  struct timespec previous_at;
-  if (clock_gettime(CLOCK_MONOTONIC, &previous_at) != 0)
-    fail("could not read monotonic clock");
+  struct timespec previous_at = monotonic_now();
   struct timespec deadline = add_ms(previous_at, options.interval_ms);
   int64_t started_at_ms = monotonic_ms(previous_at);
   uint64_t generation = new_generation();
   uint64_t sequence = 0;
+  uint64_t config_revision = 0;
   CpuFailureState cpu_failure = {0};
+  bool accepts_commands = true;
 
-  emit_hello(generation);
+  emit_hello(generation, monotonic_ms(monotonic_now()));
 
   for (;;) {
-    sleep_until(deadline);
+    struct timespec now = monotonic_now();
+    struct pollfd input = {
+        .fd = accepts_commands ? STDIN_FILENO : -1,
+        .events = POLLIN,
+    };
+    int poll_result;
+    do {
+      poll_result = poll(&input, 1, milliseconds_until(deadline, now));
+    } while (poll_result < 0 && errno == EINTR);
+    if (poll_result < 0)
+      fail("could not wait for sampler deadline");
+
+    if (poll_result > 0 && (input.revents & POLLIN) != 0) {
+      char *line = NULL;
+      size_t capacity = 0;
+      ssize_t length = getline(&line, &capacity, stdin);
+      if (length < 0) {
+        free(line);
+        accepts_commands = false;
+        continue;
+      }
+
+      ConfigureCommand command = {0};
+      bool parsed =
+          length <= MAX_COMMAND_BYTES && parse_configure(line, &command);
+      if (!parsed || command.generation != generation ||
+          command.command_id == 0 ||
+          command.config_revision < config_revision ||
+          command.interval_seconds < 2 || command.interval_seconds > 10 ||
+          command.interval_seconds > LONG_MAX / options.second_ms ||
+          (command.config_revision == config_revision &&
+           command.interval_seconds * options.second_ms !=
+               options.interval_ms)) {
+        emit_reject(generation, command.command_id);
+        free(line);
+        continue;
+      }
+
+      if (command.config_revision == config_revision) {
+        emit_ack(generation, &command);
+        free(line);
+        continue;
+      }
+
+      options.interval_ms = command.interval_seconds * options.second_ms;
+      config_revision = command.config_revision;
+      previous_result = read_counters(frames, &previous);
+      previous_at = monotonic_now();
+      deadline = add_ms(previous_at, options.interval_ms);
+      cpu_failure.code = NULL;
+      emit_ack(generation, &command);
+      emit_initializing_snapshot(generation, ++sequence, config_revision,
+                                 monotonic_ms(previous_at), started_at_ms);
+      free(line);
+      continue;
+    }
+    if (poll_result > 0 &&
+        (input.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0) {
+      accepts_commands = false;
+      continue;
+    }
 
     CpuCounters current = {0};
     ParseResult current_result = read_counters(frames, &current);
-    struct timespec sampled_at;
-    if (clock_gettime(CLOCK_MONOTONIC, &sampled_at) != 0)
-      fail("could not read monotonic clock");
+    struct timespec sampled_at = monotonic_now();
 
     if (frames != NULL && feof(frames)) {
       for (;;)
         pause();
     }
 
-    emit_snapshot(generation, ++sequence, sampled_at,
+    emit_snapshot(generation, ++sequence, config_revision, sampled_at,
                   monotonic_ms(sampled_at) - monotonic_ms(previous_at),
                   started_at_ms, &cpu_failure, &previous, &current,
                   current_result, previous_result);
