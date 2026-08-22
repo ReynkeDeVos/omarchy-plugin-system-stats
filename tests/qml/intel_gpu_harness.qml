@@ -10,7 +10,9 @@ ShellRoot {
   readonly property string expectedStatus: String(Quickshell.env("SYSTEM_STATS_INTEL_STATUS"))
   readonly property string expectedPath: String(Quickshell.env("SYSTEM_STATS_INTEL_PATH"))
   readonly property string expectedError: String(Quickshell.env("SYSTEM_STATS_INTEL_ERROR"))
-  readonly property bool expectsRecovery: String(Quickshell.env("SYSTEM_STATS_INTEL_RECOVERY")) === "1"
+  readonly property string transientError: String(Quickshell.env("SYSTEM_STATS_INTEL_TRANSIENT_ERROR"))
+  readonly property bool expectsRecovery: transientError === "permissionDenied"
+    || transientError === "counterReset"
   readonly property string intelId: "pci:0000:00:02.0"
   property bool sawRetryableError: false
 
@@ -33,9 +35,9 @@ ShellRoot {
                   && snapshot.ram.status === "available",
                   "retryable GPU error leaves host metrics available")) return
       if (!verify(snapshot.gpu.status === "unavailable"
-                  && snapshot.gpu.error.code === "permissionDenied"
+                  && snapshot.gpu.error.code === transientError
                   && snapshot.gpu.error.retryability === "retryable",
-                  "permission failure remains visible while discovery retries")) return
+                  "transient failure remains visible while measurement retries")) return
       sawRetryableError = true
       return
     }

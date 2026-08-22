@@ -9,20 +9,23 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-static int fixture_counter(uint64_t config, uint64_t *before, uint64_t *after) {
+static int fixture_counter(uint64_t config, uint64_t values[3]) {
   if (config == 1) {
-    *before = UINT64_C(100000000);
-    *after = UINT64_C(140000000);
+    values[0] = UINT64_C(100000000);
+    values[1] = UINT64_C(140000000);
+    values[2] = UINT64_C(180000000);
     return 0;
   }
   if (config == 2) {
-    *before = 0;
-    *after = UINT64_C(100000000);
+    values[0] = 0;
+    values[1] = UINT64_C(100000000);
+    values[2] = UINT64_C(200000000);
     return 0;
   }
   if (config == 3) {
-    *before = UINT64_C(200000000);
-    *after = UINT64_C(220000000);
+    values[0] = UINT64_C(200000000);
+    values[1] = UINT64_C(220000000);
+    values[2] = UINT64_C(240000000);
     return 0;
   }
   errno = EINVAL;
@@ -46,9 +49,14 @@ long syscall(long number, ...) {
     return -1;
   }
 
-  uint64_t values[2];
-  if (fixture_counter(attributes->config, &values[0], &values[1]) != 0)
+  uint64_t values[3];
+  if (fixture_counter(attributes->config, values) != 0)
     return -1;
+  const char *reset = getenv("SYSTEM_STATS_PERF_RESET_CONFIG");
+  if (reset != NULL && strtoull(reset, NULL, 0) == attributes->config) {
+    values[1] = UINT64_C(50000000);
+    values[2] = UINT64_C(90000000);
+  }
   int descriptors[2];
   if (pipe2(descriptors, O_CLOEXEC) != 0)
     return -1;

@@ -996,6 +996,11 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
           maximum = value;
       }
     }
+    if (counter_reset && read_error == NULL) {
+      for (size_t i = 0; i < measurement->pmu_event_count; i++)
+        measurement->pmu_baseline[i] = current_values[i];
+      measurement->baseline_at = now;
+    }
     if (counter_reset || read_error != NULL || window_ms <= 0) {
       record_failure(measurement,
                      counter_reset ? "counterReset"
@@ -1059,10 +1064,8 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
     record_failure(measurement,
                    counter_reset ? "counterReset" : "noTrueEnginePath", path,
                    now);
-    if (!counter_reset) {
-      measurement->baseline = current;
-      measurement->baseline_at = now;
-    }
+    measurement->baseline = current;
+    measurement->baseline_at = now;
     return unavailable_observation(measurement, now);
   }
 
