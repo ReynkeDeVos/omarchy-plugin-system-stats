@@ -80,7 +80,8 @@ static void emit_snapshot_at(uint64_t generation, uint64_t sequence,
                              int percent, int64_t published_at_ms,
                              int64_t sampled_at_ms) {
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
-         ",\"sequence\":%" PRIu64 ",\"configRevision\":0,\"phase\":\"live\","
+         ",\"sequence\":%" PRIu64
+         ",\"configRevision\":0,\"phase\":\"degraded\","
          "\"publishedAtMs\":%" PRId64 ",\"cpu\":{\"status\":\"available\","
          "\"value\":{\"percent\":%d,\"actualWindowMs\":10},"
          "\"sampledAtMs\":%" PRId64

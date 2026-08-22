@@ -19,12 +19,18 @@ cp "$repo_root/tests/qml/FakeBar.qml" "$test_dir/FakeBar.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/plugin/bin/system-stats-helper"
 cp -R "$repo_root/tests/fixtures/cpu" "$test_dir/fixtures/cpu"
 cp -R "$repo_root/tests/fixtures/ram" "$test_dir/fixtures/ram"
+cp -R "$repo_root/tests/fixtures/gpu" "$test_dir/fixtures/gpu"
+cut -f1 "$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
+  >"$test_dir/fixtures/gpu/hybrid.presence"
 cp -R /usr/share/omarchy/shell/Ui/. "$test_dir/Ui/"
 cp -R /usr/share/omarchy/shell/Commons/. "$test_dir/Commons/"
 
 SYSTEM_STATS_REVIEW_DIR="$review_dir" \
   SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/normal.stat" \
   SYSTEM_STATS_MEMINFO_FRAMES="$test_dir/fixtures/ram/normal.meminfo" \
+  SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
+  SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/hybrid.presence" \
+  SYSTEM_STATS_INTEL_PROC_FRAMES="$test_dir/fixtures/gpu/intel/i915" \
   SYSTEM_STATS_INTERVAL_MS=250 \
   QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml"

@@ -26,7 +26,7 @@ Item {
         code: "dependencyMissing",
         scope: "gpu",
         retryability: "nonRetryable",
-        diagnostic: "metric provider is outside the CPU and RAM slice"
+        diagnostic: "waiting for the GPU collector"
       },
       since: 0
     },
@@ -62,8 +62,10 @@ Item {
   readonly property int _watchdogTickMs: Math.max(1, Math.min(100, Math.floor(_secondMs / 4)))
   property double _cpuStateStartedAtMs: 0
   property double _ramStateStartedAtMs: 0
+  property double _gpuStateStartedAtMs: 0
   property double _lastCpuSuccessfulAt: -1
   property double _lastRamSuccessfulAt: -1
+  property double _lastGpuSuccessfulAt: -1
   property double _helperClockOffsetMs: 0
   property bool _hasHelperClockOffset: false
   property bool _helloReceived: false
@@ -299,12 +301,15 @@ Item {
 
   function _withLastSuccess(metric, lastSuccessfulAt) {
     if (metric.status !== "unavailable" || lastSuccessfulAt < 0) return metric
-    return {
+    var normalized = {
       status: metric.status,
       error: metric.error,
       since: metric.since,
       lastSuccessfulAt: lastSuccessfulAt
     }
+    if (metric.retryAt !== undefined) normalized.retryAt = metric.retryAt
+    if (metric.evidence !== undefined) normalized.evidence = metric.evidence
+    return normalized
   }
 
   function _unavailableMetric(code, scope, pathId, since, lastSuccessfulAt) {
@@ -348,17 +353,19 @@ Item {
     }
   }
 
-  function _phaseForMetrics(cpu, ram) {
+  function _phaseForMetrics(cpu, ram, gpu) {
     if (cpu.status === "initializing" && ram.status === "initializing") return "initializing"
-    return cpu.status === "available" && ram.status === "available" ? "live" : "degraded"
+    return cpu.status === "available" && ram.status === "available"
+      && gpu.status === "available" ? "live" : "degraded"
   }
 
-  function _publishStaleMetrics(cpu, ram) {
+  function _publishStaleMetrics(cpu, ram, gpu) {
     _publishSnapshotChanges({
-      phase: _phaseForMetrics(cpu, ram),
+      phase: _phaseForMetrics(cpu, ram, gpu),
       publishedAtMs: _helperNowMs(),
       cpu: cpu,
-      ram: ram
+      ram: ram,
+      gpu: gpu
     })
   }
 
@@ -405,11 +412,18 @@ Item {
                                  _lastCpuSuccessfulAt)
     var ram = _unavailableMetric(code, "ram", "proc-meminfo", _failureSince,
                                  _lastRamSuccessfulAt)
+    var gpu = _unavailableMetric(code, "gpu", "gpu-measurement", _failureSince,
+                                 _lastGpuSuccessfulAt)
+    if (_current.selection.stableId !== undefined) {
+      gpu.error.stableId = _current.selection.stableId
+    }
+    if (_current.gpu.evidence !== undefined) gpu.evidence = _current.gpu.evidence
     _publishSnapshotChanges({
       phase: "degraded",
       publishedAtMs: _helperNowMs(),
       cpu: cpu,
       ram: ram,
+      gpu: gpu,
       source: _collectorFailureSource(code, status, failureAt, nextRestartAt)
     })
   }
@@ -419,6 +433,8 @@ Item {
                                 _lastCpuSuccessfulAt)
     var ramAgeMs = _metricAgeMs(_current.ram, _ramStateStartedAtMs,
                                 _lastRamSuccessfulAt)
+    var gpuAgeMs = _metricAgeMs(_current.gpu, _gpuStateStartedAtMs,
+                                _lastGpuSuccessfulAt)
     var now = _helperNowMs()
     var cpu = cpuAgeMs >= 4 * _secondMs
       ? _unavailableMetric("stale", "cpu", "proc-stat", now,
@@ -428,7 +444,19 @@ Item {
       ? _unavailableMetric("stale", "ram", "proc-meminfo", now,
                            _lastRamSuccessfulAt)
       : _current.ram
-    if (cpu !== _current.cpu || ram !== _current.ram) _publishStaleMetrics(cpu, ram)
+    var gpu = gpuAgeMs >= 4 * _secondMs
+      ? _unavailableMetric("stale", "gpu",
+                           _current.gpu.path || "gpu-measurement", now,
+                           _lastGpuSuccessfulAt)
+      : _current.gpu
+    if (gpu !== _current.gpu && _current.selection.stableId !== undefined) {
+      gpu.error.stableId = _current.selection.stableId
+    }
+    if (gpu !== _current.gpu && _current.gpu.evidence !== undefined) {
+      gpu.evidence = _current.gpu.evidence
+    }
+    if (cpu !== _current.cpu || ram !== _current.ram || gpu !== _current.gpu)
+      _publishStaleMetrics(cpu, ram, gpu)
 
     if (collector.running
         && _expectedSampleAtMs >= 0
@@ -458,6 +486,7 @@ Item {
     _failureSince = -1
     _cpuStateStartedAtMs = _nowMs()
     _ramStateStartedAtMs = _nowMs()
+    _gpuStateStartedAtMs = _nowMs()
     _expectedSampleAtMs = _nowMs() + _intervalSeconds * _secondMs
     _publishSource({ status: "starting" })
     _hasHelperClockOffset = false
@@ -617,7 +646,12 @@ Item {
             && message.ram.status === "available"
             && (message.cpu.sampledAtMs !== message.ram.sampledAtMs
                 || message.cpu.window.actualMs !== message.ram.window.actualMs))
-        || message.phase !== _phaseForMetrics(message.cpu, message.ram)) {
+        || (message.gpu.status === "available"
+            && (message.selection.status !== "selected"
+                || message.gpu.value.device.stableId !== message.selection.stableId
+                || message.gpu.sampledAtMs !== message.publishedAtMs))
+        || message.phase !== _phaseForMetrics(message.cpu, message.ram,
+                                              message.gpu)) {
       _publishProtocolError()
       return
     }
@@ -630,12 +664,20 @@ Item {
     var ramLifecycle = _normalizeMetric(message.ram, "ram", "proc-meminfo",
                                         receivedAtMs, _ramStateStartedAtMs,
                                         _lastRamSuccessfulAt)
+    var gpuPath = message.gpu.status === "available"
+      ? message.gpu.path : message.gpu.error.pathId
+    var gpuLifecycle = _normalizeMetric(message.gpu, "gpu", gpuPath,
+                                        receivedAtMs, _gpuStateStartedAtMs,
+                                        _lastGpuSuccessfulAt)
     var cpuMetric = cpuLifecycle.metric
     var ramMetric = ramLifecycle.metric
+    var gpuMetric = gpuLifecycle.metric
     _cpuStateStartedAtMs = cpuLifecycle.stateStartedAtMs
     _ramStateStartedAtMs = ramLifecycle.stateStartedAtMs
     _lastCpuSuccessfulAt = cpuLifecycle.lastSuccessfulAt
     _lastRamSuccessfulAt = ramLifecycle.lastSuccessfulAt
+    _gpuStateStartedAtMs = gpuLifecycle.stateStartedAtMs
+    _lastGpuSuccessfulAt = gpuLifecycle.lastSuccessfulAt
     if (message.phase !== "initializing") {
       _expectedSampleAtMs = receivedAtMs + _intervalSeconds * _secondMs
     }
@@ -651,11 +693,11 @@ Item {
       generation: message.generation,
       sequence: message.sequence,
       configRevision: message.configRevision,
-      phase: _phaseForMetrics(cpuMetric, ramMetric),
+      phase: _phaseForMetrics(cpuMetric, ramMetric, gpuMetric),
       publishedAtMs: message.publishedAtMs,
       cpu: cpuMetric,
       ram: ramMetric,
-      gpu: message.gpu,
+      gpu: gpuMetric,
       selection: _publicGpuSelection(message.selection),
       source: { status: "running" }
     })
@@ -831,14 +873,38 @@ Item {
   }
 
   function _validGpuMetric(metric) {
-    if (!_validMetricState(metric, false) || metric.status !== "unavailable") return false
-    if (typeof metric.error.pathId !== "string" || metric.error.pathId.length === 0
-        || typeof metric.error.diagnostic !== "string"
-        || metric.error.diagnostic.length === 0) return false
-    if (metric.error.stableId !== undefined
-        && !_validStableGpuId(metric.error.stableId)) return false
-    return metric.retryAt === undefined
-      || (Number.isInteger(metric.retryAt) && metric.retryAt >= 0)
+    if (!_validMetricState(metric, false)) return false
+    if (metric.status === "unavailable") {
+      if (typeof metric.error.pathId !== "string" || metric.error.pathId.length === 0
+          || typeof metric.error.diagnostic !== "string"
+          || metric.error.diagnostic.length === 0) return false
+      if (metric.error.stableId !== undefined
+          && !_validStableGpuId(metric.error.stableId)) return false
+      if (metric.evidence !== undefined && typeof metric.evidence !== "string") return false
+      return metric.retryAt === undefined
+        || (Number.isInteger(metric.retryAt) && metric.retryAt >= 0)
+    }
+    return metric.status === "available"
+      && metric.value
+      && Number.isInteger(metric.value.percent)
+      && metric.value.percent >= 0
+      && metric.value.percent <= 100
+      && metric.value.device
+      && _validStableGpuId(metric.value.device.stableId)
+      && typeof metric.value.device.pciBdf === "string"
+      && /^\d{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(metric.value.device.pciBdf)
+      && metric.value.device.stableId === "pci:" + metric.value.device.pciBdf
+      && metric.value.semantics === "graphicsEngineBusy"
+      && Number.isInteger(metric.value.actualWindowMs)
+      && metric.value.actualWindowMs > 0
+      && Number.isInteger(metric.sampledAtMs)
+      && metric.sampledAtMs >= 0
+      && metric.window
+      && Number.isInteger(metric.window.actualMs)
+      && metric.window.actualMs === metric.value.actualWindowMs
+      && typeof metric.evidence === "string"
+      && typeof metric.path === "string"
+      && metric.path.length > 0
   }
 
   function _sameGpuSelection(left, right) {

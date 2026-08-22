@@ -1,0 +1,6 @@
+pos:	0
+drm-driver:	i915
+drm-client-id:	7
+drm-pdev:	0000:00:02.0
+drm-cycles-rcs:	100
+drm-total-cycles-rcs:	1000

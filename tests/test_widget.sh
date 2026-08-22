@@ -40,7 +40,8 @@ SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/widget.stat" \
   SYSTEM_STATS_MEMINFO_FRAMES="$test_dir/fixtures/ram/widget.meminfo" \
   SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
   SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/hybrid.presence" \
-  SYSTEM_STATS_INTERVAL_MS=200 \
+  SYSTEM_STATS_INTEL_PROC_FRAMES="$test_dir/fixtures/gpu/intel/i915" \
+  SYSTEM_STATS_INTERVAL_MS=100 \
   SYSTEM_STATS_TRACE_EXECUTABLE="$helper_path" \
   SYSTEM_STATS_TRACE_FILE="$trace_file" \
   LD_PRELOAD="$observer" \
@@ -111,6 +112,22 @@ mapfile -t sampler_events < <(awk '$1 == "sampler" { print $2 ":" $3 }' "$trace_
 [[ ${#launch_events[@]} -eq 1 ]]
 [[ ${#sampler_events[@]} -eq 1 ]]
 [[ ${sampler_events[0]%%:*} == "${launch_events[0]}" ]]
+
+cp "$repo_root/tests/qml/widget_error_harness.qml" "$test_dir/error-shell.qml"
+error_output=$(SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/widget.stat" \
+  SYSTEM_STATS_MEMINFO_FRAMES="$test_dir/fixtures/ram/widget.meminfo" \
+  SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
+  SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/hybrid.presence" \
+  SYSTEM_STATS_INTEL_PROC_FRAMES="$test_dir/fixtures/gpu/intel/permission-denied" \
+  SYSTEM_STATS_INTERVAL_MS=100 \
+  QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color --path "$test_dir/error-shell.qml" 2>&1) || {
+    printf '%s\n' "$error_output"
+    exit 1
+  }
+printf '%s\n' "$error_output"
+grep -Fq "TEST-PASS: Intel GPU error is visible without hiding CPU or RAM" \
+  <<<"$error_output"
 
 if rg -n '\b(Process|Timer)\s*\{' "$repo_root/BarWidget.qml"; then
   echo "screen callers must remain pure readers without helpers or sampling timers" >&2

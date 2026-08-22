@@ -37,8 +37,8 @@ ShellRoot {
     if (!verify(snapshot.schemaVersion === 1, "schema version")) return
     if (!verify(Number.isSafeInteger(snapshot.generation), "safe generation")) return
     if (!verify(snapshot.generation > 4294967295, "wide generation")) return
-    var expectedPhase = expectedStatus === "available" ? "live" : "degraded"
-    if (!verify(snapshot.phase === expectedPhase, "snapshot phase")) return
+    if (!verify(snapshot.phase === "degraded",
+                "unavailable GPU keeps the snapshot degraded")) return
     if (!verify(snapshot.cpu.status === expectedStatus, "CPU status")) return
     if (!verify(snapshot.ram.status === "available"
                 && snapshot.ram.value.percent === 63,

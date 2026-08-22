@@ -93,6 +93,8 @@ void gpu_inventory_restore_session(
     const char *auto_stable_id, int fixed_retry_stage,
     int64_t fixed_retry_at_ms, struct timespec now);
 bool gpu_inventory_selected_present(const GpuInventoryManager *manager);
+const GpuDevice *
+gpu_inventory_selected_device(const GpuInventoryManager *manager);
 bool gpu_inventory_retry_due(const GpuInventoryManager *manager,
                              struct timespec now);
 int gpu_inventory_poll_timeout(const GpuInventoryManager *manager,
@@ -102,6 +104,8 @@ void gpu_inventory_emit(const GpuInventoryManager *manager,
 void gpu_inventory_emit_state(const GpuInventoryManager *manager);
 void gpu_inventory_emit_snapshot_fields(GpuInventoryManager *manager,
                                         struct timespec now);
+void gpu_inventory_emit_snapshot_state_fields(
+    const GpuInventoryManager *manager);
 const char *gpu_selection_mode_name(GpuSelectionMode mode);
 
 #endif
