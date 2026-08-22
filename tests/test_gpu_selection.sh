@@ -50,6 +50,7 @@ run_case ambiguous multiple-ambiguous.inventory
 run_case hotplug single-intel.inventory
 run_case fixed single-intel.inventory 1
 run_case fixed-amd single-intel.inventory 1
+run_case fixed-intel nvidia-only.inventory 1
 run_case fixed-immediate single-intel.inventory
 run_case switch-auto hybrid-unique-display.inventory
 

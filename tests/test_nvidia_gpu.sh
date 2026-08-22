@@ -104,7 +104,7 @@ run_case missing-library unavailable dependencyMissing retryable \
   "$test_dir/does-not-exist/libnvidia-ml.so.1"
 run_case driver-missing unavailable dependencyMissing retryable
 run_case device-missing unavailable deviceMissing retryable
-run_case identity-mismatch unavailable deviceMissing retryable
+run_case identity-mismatch unavailable sourceUnreadable retryable
 run_case nvml-timeout unavailable sampleTimeout retryable
 run_case hung-call unavailable sampleTimeout retryable
 run_case hung-reopen unavailable sampleTimeout retryable

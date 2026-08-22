@@ -36,8 +36,14 @@ ShellRoot {
                 "the identity mismatch remains unavailable")
       && verify(snapshot.gpu.value === undefined,
                 "no mismatched GPU value is published")
-      && verify(snapshot.gpu.error.code === "deviceMissing",
-                "the identity mismatch stays visible")
+      && verify(snapshot.gpu.error.code === "sourceUnreadable",
+                "the identity mismatch stays a measurement error")
+      && verify(snapshot.gpu.error.pathId === "nvidia-nvml",
+                "the error names the selected measurement path")
+      && verify(snapshot.gpu.error.diagnostic.indexOf("does not match") !== -1,
+                "the detail diagnostic explains the identity mismatch")
+      && verify(snapshot.gpu.evidence === "fixtureTested",
+                "the error preserves its evidence status")
       && verify(snapshot.gpu.error.stableId === selectedId,
                 "the error stays bound to the selected UUID")
       && verify(snapshot.selection.status === "selected",

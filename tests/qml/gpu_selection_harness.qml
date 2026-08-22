@@ -12,7 +12,28 @@ ShellRoot {
   readonly property string intelId: "pci:0000:00:02.0"
   readonly property string amdId: "pci:0000:03:00.0"
   readonly property string nvidiaId: "nvidia:GPU-22222222-2222-2222-2222-222222222222"
-  readonly property string fixedTargetId: caseName === "fixed-amd" ? amdId : nvidiaId
+  readonly property var fixedCase: caseName === "fixed-amd" ? ({
+    targetId: amdId,
+    targetLine: amdId + "\tAMD Radeon RX Fixture\tamd\t0000:03:00.0\tno\t1\n",
+    vendor: "AMD",
+    expectedError: "deviceMissing",
+    otherId: intelId,
+    otherLine: intelId + "\tIntel Meteor Lake-P Graphics\tintel\t0000:00:02.0\tyes\t1\n"
+  }) : caseName === "fixed-intel" ? ({
+    targetId: intelId,
+    targetLine: intelId + "\tIntel Meteor Lake-P Graphics\tintel\t0000:00:02.0\tno\t1\n",
+    vendor: "Intel",
+    expectedError: "noTrueEnginePath",
+    otherId: nvidiaId,
+    otherLine: nvidiaId + "\tNVIDIA GeForce RTX Fixture\tnvidia\t0000:01:00.0\tyes\t1\n"
+  }) : ({
+    targetId: nvidiaId,
+    targetLine: nvidiaId + "\tNVIDIA GeForce RTX Fixture\tnvidia\t0000:01:00.0\tno\t1\n",
+    vendor: "Nvidia",
+    expectedError: "dependencyMissing",
+    otherId: intelId,
+    otherLine: intelId + "\tIntel Meteor Lake-P Graphics\tintel\t0000:00:02.0\tyes\t1\n"
+  })
   property bool finished: false
   property int stage: 0
   property int stableRevision: 0
@@ -193,7 +214,7 @@ ShellRoot {
       session.configure({
         configRevision: 1,
         intervalSeconds: 2,
-        gpuSelection: { mode: "fixed", stableId: fixedTargetId }
+        gpuSelection: { mode: "fixed", stableId: fixedCase.targetId }
       })
       return
     }
@@ -201,11 +222,11 @@ ShellRoot {
         && snapshot.configRevision === 1 && snapshot.selection.status === "missing") {
       if (!checkIndependentMetrics(snapshot)) return
       if (!verify(snapshot.selection.mode === "fixed", "fixed mode retained")) return
-      if (!verify(snapshot.selection.stableId === fixedTargetId, "missing fixed identity retained")) return
+      if (!verify(snapshot.selection.stableId === fixedCase.targetId, "missing fixed identity retained")) return
       if (!verify(snapshot.gpu.error.code === "deviceMissing", "fixed absence is explicit")) return
-      if (!verify(snapshot.gpu.error.stableId === fixedTargetId, "missing error keeps fixed identity")) return
+      if (!verify(snapshot.gpu.error.stableId === fixedCase.targetId, "missing error keeps fixed identity")) return
       if (!verify(snapshot.gpu.error.pathId === "gpu-inventory", "missing fixed GPU identifies inventory path")) return
-      if (!verify(device(intelId) !== null, "other GPU remains inventoried")) return
+      if (!verify(device(fixedCase.otherId) !== null, "other GPU remains inventoried")) return
       stableRevision = session.gpuInventory.revision
       stage = 2
       return
@@ -220,11 +241,10 @@ ShellRoot {
     }
     if (stage === 4 && session.gpuInventory.revision >= stableRevision + 1
         && snapshot.selection.status === "selected") {
-      if (!verify(snapshot.selection.stableId === fixedTargetId, "returning fixed identity restored")) return
-      var expectedError = caseName === "fixed-amd" ? "deviceMissing" : "dependencyMissing"
-      if (!verify(snapshot.gpu.error.code === expectedError,
+      if (!verify(snapshot.selection.stableId === fixedCase.targetId, "returning fixed identity restored")) return
+      if (!verify(snapshot.gpu.error.code === fixedCase.expectedError,
                   "returned GPU reports its vendor measurement failure")) return
-      finish("fixed " + (caseName === "fixed-amd" ? "AMD" : "Nvidia")
+      finish("fixed " + fixedCase.vendor
              + " GPU retries, pauses, and returns through SystemStatsSession")
     }
   }
@@ -424,7 +444,8 @@ ShellRoot {
     else if (caseName === "unique-display") checkUniqueDisplay(snapshot)
     else if (caseName === "ambiguous") checkAmbiguous(snapshot)
     else if (caseName === "hotplug") checkHotplug(snapshot)
-    else if (caseName === "fixed" || caseName === "fixed-amd") checkFixed(snapshot)
+    else if (caseName === "fixed" || caseName === "fixed-amd"
+             || caseName === "fixed-intel") checkFixed(snapshot)
     else if (caseName === "fixed-immediate") checkFixedImmediate(snapshot)
     else if (caseName === "switch-auto") checkSwitchToAuto(snapshot)
     else if (caseName === "auto-restart") checkAutoRestart(snapshot)
@@ -485,12 +506,8 @@ ShellRoot {
     onTriggered: {
       if (!verify(session.gpuInventory.revision === stableRevision,
                   "automatic fixed-device search remains paused")) return
-      inventoryFile.setText("" +
-        intelId + "\tIntel Meteor Lake-P Graphics\tintel\t0000:00:02.0\tyes\t1\n" +
-        (caseName === "fixed-amd"
-          ? amdId + "\tAMD Radeon RX Fixture\tamd\t0000:03:00.0\tno\t1\n"
-          : nvidiaId + "\tNVIDIA GeForce RTX Fixture\tnvidia\t0000:01:00.0\tno\t1\n"))
-      presenceFile.setText(intelId + "\n" + fixedTargetId + "\n")
+      inventoryFile.setText(fixedCase.otherLine + fixedCase.targetLine)
+      presenceFile.setText(fixedCase.otherId + "\n" + fixedCase.targetId + "\n")
       stage = 4
       refreshCommandId = session.refreshGpuInventory()
     }
