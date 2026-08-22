@@ -95,6 +95,8 @@ ShellRoot {
     if (!verify(screenA.cpuVisible && screenB.cpuVisible, "CPU metrics visible")) return
     if (!verify(screenA.ramVisible && screenB.ramVisible, "RAM metrics visible")) return
     if (!verify(screenA.gpuVisible && screenB.gpuVisible, "GPU metrics visible")) return
+    if (!verify(!screenA.gpuErrorVisible && !screenB.gpuErrorVisible,
+                "available GPU metrics have no error marker")) return
     if (!verify(screenA.displayValue === "37", "screen A CPU value")) return
     if (!verify(screenB.displayValue === "37", "screen B CPU value")) return
     if (!verify(screenA.ramDisplayFormat === "percent", "screen A default RAM format")) return

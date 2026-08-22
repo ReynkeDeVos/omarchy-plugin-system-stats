@@ -23,9 +23,12 @@ BarWidget {
   readonly property string ramDisplayValue: !ramVisible ? ""
     : (ramDisplayFormat === "gib" ? ramGiBValue : String(snapshot.ram.value.percent))
   readonly property string ramDisplayUnit: ramDisplayFormat === "gib" ? " GiB" : "%"
-  readonly property string gpuDisplayValue: gpuVisible ? String(snapshot.gpu.value.percent) : ""
   readonly property bool warningVisible: !initializing && !cpuVisible && !ramVisible && !gpuVisible
+  readonly property bool gpuErrorVisible: !initializing && !gpuVisible && !warningVisible
+  readonly property string gpuDisplayValue: gpuVisible ? String(snapshot.gpu.value.percent)
+    : (gpuErrorVisible ? "!" : "")
   readonly property color metricColor: bar ? bar.barForeground : Color.foreground
+  readonly property color gpuColor: gpuErrorVisible ? Color.urgent : metricColor
   readonly property bool opened: popupOpen
   readonly property var gpuInventory: session ? session.gpuInventory : ({ revision: 0, devices: [] })
   readonly property var gpuOptions: buildGpuOptions()
@@ -239,6 +242,7 @@ BarWidget {
         : "RAM " + ramDisplayValue + " Prozent")
     }
     if (gpuVisible) metrics.push("GPU " + gpuDisplayValue + " Prozent")
+    else if (gpuErrorVisible) metrics.push("GPU Messwert nicht verfügbar")
     return metrics.length > 0
       ? "System Stats, " + metrics.join(", ")
       : "System Stats, Messwerte nicht verfügbar"
@@ -255,8 +259,9 @@ BarWidget {
   onMetricColorChanged: {
     cpuIcon.requestPaint()
     ramIcon.requestPaint()
-    gpuIcon.requestPaint()
   }
+
+  onGpuColorChanged: gpuIcon.requestPaint()
 
   Row {
     id: content
@@ -428,7 +433,7 @@ BarWidget {
     }
 
     Row {
-      visible: root.gpuVisible
+      visible: root.gpuVisible || root.gpuErrorVisible
       spacing: Style.space(2)
 
       Canvas {
@@ -442,7 +447,7 @@ BarWidget {
           var context = getContext("2d")
           var scale = width / 16
           context.reset()
-          context.strokeStyle = root.metricColor
+          context.strokeStyle = root.gpuColor
           context.lineWidth = Math.max(1, 1.45 * scale)
           context.lineCap = "round"
           context.lineJoin = "round"
@@ -475,7 +480,7 @@ BarWidget {
 
           anchors.fill: parent
           text: root.gpuDisplayValue
-          color: root.metricColor
+          color: root.gpuColor
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.body
           font.features: { "tnum": 1 }
@@ -492,9 +497,10 @@ BarWidget {
       }
 
       Text {
+        visible: root.gpuVisible
         anchors.verticalCenter: parent.verticalCenter
         text: "%"
-        color: root.metricColor
+        color: root.gpuColor
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.body
         renderType: Text.NativeRendering

@@ -13,6 +13,7 @@ typedef struct {
   const char *event_source_root;
   const char *pci_devices_root;
   bool fixture_system;
+  bool fixture_pmu_system;
 } GpuMeasurementOptions;
 
 typedef struct GpuMeasurement GpuMeasurement;

@@ -46,6 +46,7 @@ typedef struct {
   const char *event_source_root;
   const char *pci_devices_root;
   bool fixture_system;
+  bool fixture_pmu_system;
   long interval_ms;
   long second_ms;
 } Options;
@@ -165,6 +166,9 @@ static Options parse_options(int argc, char **argv) {
                         nvidia_root != NULL || udev_data_root != NULL ||
                         proc_root != NULL || intel_proc_frames_root != NULL ||
                         event_source_root != NULL || pci_devices_root != NULL,
+      .fixture_pmu_system =
+          event_source_root != NULL && *event_source_root != '\0' &&
+          pci_devices_root != NULL && *pci_devices_root != '\0',
       .interval_ms = 2000,
       .second_ms = 1000,
   };
@@ -829,6 +833,7 @@ int main(int argc, char **argv) {
       .event_source_root = options.event_source_root,
       .pci_devices_root = options.pci_devices_root,
       .fixture_system = options.fixture_system,
+      .fixture_pmu_system = options.fixture_pmu_system,
   };
   gpu_measurement = gpu_measurement_create(&measurement_options);
   if (gpu_measurement == NULL)

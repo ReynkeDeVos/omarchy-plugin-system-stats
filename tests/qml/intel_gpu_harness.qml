@@ -10,7 +10,9 @@ ShellRoot {
   readonly property string expectedStatus: String(Quickshell.env("SYSTEM_STATS_INTEL_STATUS"))
   readonly property string expectedPath: String(Quickshell.env("SYSTEM_STATS_INTEL_PATH"))
   readonly property string expectedError: String(Quickshell.env("SYSTEM_STATS_INTEL_ERROR"))
+  readonly property bool expectsRecovery: String(Quickshell.env("SYSTEM_STATS_INTEL_RECOVERY")) === "1"
   readonly property string intelId: "pci:0000:00:02.0"
+  property bool sawRetryableError: false
 
   function fail(message) {
     if (finished) return
@@ -25,7 +27,22 @@ ShellRoot {
   }
 
   function checkSnapshot(snapshot) {
-    if (finished || snapshot.sequence !== 1) return
+    if (finished) return
+    if (expectsRecovery && snapshot.sequence === 1) {
+      if (!verify(snapshot.cpu.status === "available"
+                  && snapshot.ram.status === "available",
+                  "retryable GPU error leaves host metrics available")) return
+      if (!verify(snapshot.gpu.status === "unavailable"
+                  && snapshot.gpu.error.code === "permissionDenied"
+                  && snapshot.gpu.error.retryability === "retryable",
+                  "permission failure remains visible while discovery retries")) return
+      sawRetryableError = true
+      return
+    }
+    var expectedSequence = expectsRecovery ? 2 : 1
+    if (snapshot.sequence !== expectedSequence) return
+    if (expectsRecovery
+        && !verify(sawRetryableError, "success follows a visible retryable error")) return
     if (!verify(snapshot.cpu.status === "available", "CPU remains available")) return
     if (!verify(snapshot.ram.status === "available", "RAM remains available")) return
     if (!verify(snapshot.selection.status === "selected"

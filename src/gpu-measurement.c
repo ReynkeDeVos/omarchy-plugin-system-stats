@@ -451,7 +451,8 @@ static int perf_event_open_counter(unsigned int type, uint64_t config,
 typedef enum {
   PMU_OPEN_OK,
   PMU_OPEN_UNAVAILABLE,
-  PMU_OPEN_PERMISSION_DENIED
+  PMU_OPEN_PERMISSION_DENIED,
+  PMU_OPEN_UNKNOWN_ABI
 } PmuOpenResult;
 
 static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
@@ -490,37 +491,49 @@ static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
   if (events == NULL)
     return PMU_OPEN_UNAVAILABLE;
   bool permission_denied = false;
+  bool event_failed = false;
+  size_t eligible_events = 0;
   struct dirent *entry;
-  while ((entry = readdir(events)) != NULL &&
-         measurement->pmu_event_count < INTEL_MAX_PMU_EVENTS) {
+  while ((entry = readdir(events)) != NULL) {
     if (!suffix_matches(entry->d_name, "-busy"))
       continue;
+    eligible_events++;
+    if (measurement->pmu_event_count >= INTEL_MAX_PMU_EVENTS) {
+      event_failed = true;
+      continue;
+    }
     char unit_path[PATH_MAX];
     char event_path[PATH_MAX];
     if (snprintf(unit_path, sizeof(unit_path), "%s/%s.unit", path,
                  entry->d_name) >= (int)sizeof(unit_path) ||
         snprintf(event_path, sizeof(event_path), "%s/%s", path,
-                 entry->d_name) >= (int)sizeof(event_path))
+                 entry->d_name) >= (int)sizeof(event_path)) {
+      event_failed = true;
       continue;
+    }
     char unit[32] = {0};
     char config_text[128] = {0};
     uint64_t config = 0;
     if (!read_text_file(unit_path, unit, sizeof(unit)) ||
         strcmp(unit, "ns") != 0 ||
         !read_text_file(event_path, config_text, sizeof(config_text)) ||
-        !parse_config(config_text, &config))
+        !parse_config(config_text, &config)) {
+      event_failed = true;
       continue;
+    }
     int descriptor =
         perf_event_open_counter((unsigned int)type_value, config, cpu);
     if (descriptor < 0) {
       if (errno == EACCES || errno == EPERM)
         permission_denied = true;
+      event_failed = true;
       continue;
     }
     uint64_t baseline = 0;
     if (read(descriptor, &baseline, sizeof(baseline)) !=
         (ssize_t)sizeof(baseline)) {
       close(descriptor);
+      event_failed = true;
       continue;
     }
     size_t index = measurement->pmu_event_count++;
@@ -529,12 +542,16 @@ static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
   }
   closedir(events);
 
-  if (measurement->pmu_event_count > 0) {
+  if (eligible_events > 0 && !event_failed &&
+      measurement->pmu_event_count == eligible_events) {
     measurement->path = INTEL_PATH_I915_PMU;
     measurement->baseline_at = baseline_instant(measurement, now);
     return PMU_OPEN_OK;
   }
-  return permission_denied ? PMU_OPEN_PERMISSION_DENIED : PMU_OPEN_UNAVAILABLE;
+  close_pmu(measurement);
+  if (permission_denied)
+    return PMU_OPEN_PERMISSION_DENIED;
+  return event_failed ? PMU_OPEN_UNKNOWN_ABI : PMU_OPEN_UNAVAILABLE;
 }
 
 static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
@@ -694,6 +711,32 @@ static void prepare_fdinfo(GpuMeasurement *measurement, struct timespec now) {
   }
 }
 
+static void prepare_intel_path(GpuMeasurement *measurement,
+                               struct timespec now) {
+  if (measurement->options.fixture_proc_frames_root != NULL) {
+    prepare_fdinfo(measurement, now);
+    return;
+  }
+  if (measurement->options.fixture_system &&
+      !measurement->options.fixture_pmu_system) {
+    record_failure(measurement, "noTrueEnginePath", "intel-measurement", now);
+    return;
+  }
+
+  PmuOpenResult pmu = open_i915_pmu(measurement, now);
+  if (pmu == PMU_OPEN_OK)
+    return;
+  if (!measurement->options.fixture_system)
+    prepare_fdinfo(measurement, now);
+  if (measurement->path != INTEL_PATH_NONE)
+    return;
+  if (pmu == PMU_OPEN_PERMISSION_DENIED) {
+    record_failure(measurement, "permissionDenied", "intel-i915-pmu", now);
+  } else if (pmu == PMU_OPEN_UNKNOWN_ABI) {
+    record_failure(measurement, "unsupportedDevice", "intel-i915-pmu", now);
+  }
+}
+
 GpuMeasurement *gpu_measurement_create(const GpuMeasurementOptions *options) {
   GpuMeasurement *measurement = calloc(1, sizeof(*measurement));
   if (measurement != NULL)
@@ -726,22 +769,7 @@ void gpu_measurement_reconcile(GpuMeasurement *measurement,
            "%s", selected == NULL ? "" : selected->pci_bdf);
   if (selected == NULL || selected->vendor != GPU_VENDOR_INTEL)
     return;
-  if (measurement->options.fixture_system) {
-    if (measurement->options.fixture_proc_frames_root == NULL) {
-      record_failure(measurement, "noTrueEnginePath", "intel-measurement", now);
-    } else {
-      prepare_fdinfo(measurement, now);
-    }
-    return;
-  }
-  PmuOpenResult pmu = open_i915_pmu(measurement, now);
-  if (pmu == PMU_OPEN_OK)
-    return;
-  prepare_fdinfo(measurement, now);
-  if (pmu == PMU_OPEN_PERMISSION_DENIED &&
-      measurement->path == INTEL_PATH_NONE) {
-    record_failure(measurement, "permissionDenied", "intel-i915-pmu", now);
-  }
+  prepare_intel_path(measurement, now);
 }
 
 void gpu_measurement_reset(GpuMeasurement *measurement,
@@ -930,8 +958,15 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
   if (selected == NULL || selected->vendor != GPU_VENDOR_INTEL)
     return (GpuObservation){0};
   if (measurement->path == INTEL_PATH_NONE) {
-    if (measurement->failure_code == NULL)
-      prepare_fdinfo(measurement, now);
+    GpuObservation prior = unavailable_observation(measurement, now);
+    bool retryable =
+        measurement->failure_code == NULL ||
+        (strcmp(measurement->failure_code, "unsupportedDevice") != 0 &&
+         strcmp(measurement->failure_code, "noTrueEnginePath") != 0);
+    if (retryable)
+      prepare_intel_path(measurement, now);
+    if (measurement->path != INTEL_PATH_NONE)
+      return prior;
     return unavailable_observation(measurement, now);
   }
 
@@ -940,28 +975,27 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
     long double maximum = 0.0L;
     bool counter_reset = false;
     const char *read_error = NULL;
+    uint64_t current_values[INTEL_MAX_PMU_EVENTS] = {0};
     for (size_t i = 0; i < measurement->pmu_event_count; i++) {
-      uint64_t current = 0;
-      if (read(measurement->pmu_fds[i], &current, sizeof(current)) !=
-          (ssize_t)sizeof(current)) {
+      if (read(measurement->pmu_fds[i], &current_values[i],
+               sizeof(current_values[i])) !=
+          (ssize_t)sizeof(current_values[i])) {
         read_error = errno == EACCES || errno == EPERM ? "permissionDenied"
                      : errno == ENODEV || errno == ENXIO || errno == EIO
                          ? "deviceMissing"
                          : "noTrueEnginePath";
         continue;
       }
-      if (current < measurement->pmu_baseline[i]) {
+      if (current_values[i] < measurement->pmu_baseline[i]) {
         counter_reset = true;
       } else if (window_ms > 0) {
         long double value =
-            (long double)(current - measurement->pmu_baseline[i]) * 100.0L /
-            ((long double)window_ms * 1000000.0L);
+            (long double)(current_values[i] - measurement->pmu_baseline[i]) *
+            100.0L / ((long double)window_ms * 1000000.0L);
         if (value > maximum)
           maximum = value;
       }
-      measurement->pmu_baseline[i] = current;
     }
-    measurement->baseline_at = now;
     if (counter_reset || read_error != NULL || window_ms <= 0) {
       record_failure(measurement,
                      counter_reset ? "counterReset"
@@ -970,6 +1004,9 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
                      "intel-i915-pmu", now);
       return unavailable_observation(measurement, now);
     }
+    for (size_t i = 0; i < measurement->pmu_event_count; i++)
+      measurement->pmu_baseline[i] = current_values[i];
+    measurement->baseline_at = now;
     if (maximum > 100.0L)
       maximum = 100.0L;
     measurement->failure_code = NULL;
@@ -1007,9 +1044,6 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
                            ? "unsupportedDevice"
                            : "noTrueEnginePath";
     record_failure(measurement, code, path, now);
-    if (scan == INTEL_SCAN_OK)
-      measurement->baseline = current;
-    measurement->baseline_at = now;
     return unavailable_observation(measurement, now);
   }
 
@@ -1021,14 +1055,19 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
                                     &counter_reset)
                        : i915_percent(&measurement->baseline, &current,
                                       window_ms, &percent, &counter_reset);
-  measurement->baseline = current;
-  measurement->baseline_at = now;
   if (!available) {
     record_failure(measurement,
                    counter_reset ? "counterReset" : "noTrueEnginePath", path,
                    now);
+    if (!counter_reset) {
+      measurement->baseline = current;
+      measurement->baseline_at = now;
+    }
     return unavailable_observation(measurement, now);
   }
+
+  measurement->baseline = current;
+  measurement->baseline_at = now;
 
   measurement->failure_code = NULL;
   measurement->failure_path = NULL;

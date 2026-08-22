@@ -24,8 +24,12 @@ ShellRoot {
     if (!verify(snapshot.phase === "degraded", "GPU failure degrades the snapshot")) return
     if (!verify(widget.cpuVisible && widget.ramVisible,
                 "GPU failure leaves CPU and RAM visible")) return
-    if (!verify(!widget.gpuVisible, "unavailable GPU value is hidden from the bar")) return
+    if (!verify(!widget.gpuVisible, "unavailable GPU value is not shown as a percentage")) return
+    if (!verify(widget.gpuErrorVisible, "GPU error marker is visible in the bar")) return
+    if (!verify(widget.gpuDisplayValue === "!", "GPU error marker replaces the value")) return
     if (!verify(!widget.warningVisible, "healthy host metrics avoid a global warning")) return
+    if (!verify(widget.Accessible.name.indexOf("GPU Messwert nicht verfügbar") !== -1,
+                "GPU error marker has an accessible description")) return
     if (!verify(widget.gpuStatusSummary()
                 === "GPU counters are not readable with the current permissions.",
                 "detail panel explains the permission failure")) return
