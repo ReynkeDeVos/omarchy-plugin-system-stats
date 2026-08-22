@@ -1,0 +1,2 @@
+pci:0000:00:02.0	Intel Meteor Lake-P Graphics	intel	0000:00:02.0	no	1
+pci:0000:c4:00.0	AMD Radeon 780M Fixture	amd	0000:c4:00.0	yes	1

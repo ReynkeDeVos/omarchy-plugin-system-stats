@@ -1,0 +1,2 @@
+nvidia:GPU-11111111-1111-1111-1111-111111111111	NVIDIA RTX Other Fixture	nvidia	0000:02:00.0	no	1
+pci:0000:c4:00.0	AMD Radeon 780M Fixture	amd	0000:c4:00.0	yes	1

@@ -942,6 +942,7 @@ int main(int argc, char **argv) {
 
       bool interval_changed =
           command.interval_seconds * options.second_ms != options.interval_ms;
+      bool inventory_refreshed = false;
       if (command.resumes_gpu_session) {
         gpu_inventory_restore_session(
             &gpu_inventory, command.gpu_selection_mode, command.gpu_stable_id,
@@ -949,13 +950,24 @@ int main(int argc, char **argv) {
             command.resume_fixed_retry_stage, command.resume_fixed_retry_at_ms,
             monotonic_now());
       } else {
-        gpu_inventory_set_selection(&gpu_inventory, command.gpu_selection_mode,
-                                    command.gpu_stable_id, monotonic_now());
+        struct timespec configured_at = monotonic_now();
+        bool selection_changed = gpu_inventory_set_selection(
+            &gpu_inventory, command.gpu_selection_mode, command.gpu_stable_id,
+            configured_at);
+        if (selection_changed &&
+            command.gpu_selection_mode == GPU_SELECTION_FIXED &&
+            gpu_inventory.status == GPU_SELECTION_MISSING) {
+          gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_CONFIGURATION,
+                                  configured_at);
+          inventory_refreshed = true;
+        }
       }
       gpu_measurement_reconcile(gpu_measurement,
                                 gpu_inventory_selected_device(&gpu_inventory),
                                 monotonic_now());
       config_revision = command.config_revision;
+      if (inventory_refreshed)
+        gpu_inventory_emit(&gpu_inventory, generation);
       emit_configure_ack(generation, &command, &gpu_inventory);
       if (interval_changed) {
         options.interval_ms = command.interval_seconds * options.second_ms;

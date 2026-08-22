@@ -1522,7 +1522,12 @@ void gpu_measurement_reconcile(GpuMeasurement *measurement,
                                const GpuDevice *selected, struct timespec now) {
   GpuReader *reader = &measurement->reader;
   const char *stable_id = selected == NULL ? "" : selected->stable_id;
-  if (strcmp(reader->selected_stable_id, stable_id) == 0)
+  const char *pci_bdf = selected == NULL ? "" : selected->pci_bdf;
+  const GpuAdapter *adapter =
+      selected == NULL ? NULL : find_adapter(selected->vendor);
+  if (strcmp(reader->selected_stable_id, stable_id) == 0 &&
+      strcmp(reader->selected_pci_bdf, pci_bdf) == 0 &&
+      reader->adapter == adapter)
     return;
 
   close_reader(reader);
@@ -1530,10 +1535,10 @@ void gpu_measurement_reconcile(GpuMeasurement *measurement,
   snprintf(reader->selected_stable_id, sizeof(reader->selected_stable_id), "%s",
            stable_id);
   snprintf(reader->selected_pci_bdf, sizeof(reader->selected_pci_bdf), "%s",
-           selected == NULL ? "" : selected->pci_bdf);
+           pci_bdf);
   if (selected == NULL)
     return;
-  reader->adapter = find_adapter(selected->vendor);
+  reader->adapter = adapter;
   if (reader->adapter != NULL)
     reader->adapter->open(reader, now);
 }

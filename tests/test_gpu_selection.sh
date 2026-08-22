@@ -30,6 +30,7 @@ run_case() {
     SYSTEM_STATS_GPU_INVENTORY_FILE="$inventory_file" \
     SYSTEM_STATS_GPU_PRESENCE_FILE="$presence_file" \
     SYSTEM_STATS_NVML_LIBRARY="$test_dir/missing-nvml.so" \
+    SYSTEM_STATS_PCI_DEVICES_ROOT="$test_dir/missing-pci" \
     SYSTEM_STATS_SECOND_MS="$second_ms" \
     QT_QPA_PLATFORM=offscreen \
     timeout 15s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
@@ -48,6 +49,8 @@ run_case unique-display hybrid-unique-display.inventory
 run_case ambiguous multiple-ambiguous.inventory
 run_case hotplug single-intel.inventory
 run_case fixed single-intel.inventory 1
+run_case fixed-amd single-intel.inventory 1
+run_case fixed-immediate single-intel.inventory
 run_case switch-auto hybrid-unique-display.inventory
 
 run_linux_label_case() {

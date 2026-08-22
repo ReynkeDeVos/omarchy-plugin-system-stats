@@ -113,6 +113,27 @@ run_case invalid-value unavailable malformedCounter retryable
 run_case mig-unavailable unavailable unsupportedDevice nonRetryable
 run_case suspended unavailable deviceSuspended retryable
 
+cp "$repo_root/tests/qml/nvidia_relocation_harness.qml" \
+  "$test_dir/relocation-shell.qml"
+cp "$repo_root/tests/fixtures/gpu/multiple-nvidia-swapped.inventory" \
+  "$test_dir/fixtures/gpu.inventory"
+cut -f1 "$test_dir/fixtures/gpu.inventory" >"$test_dir/fixtures/gpu.presence"
+relocation_output=$(SYSTEM_STATS_NVML_CASE=relocated \
+  SYSTEM_STATS_NVML_LIBRARY="$fake_nvml" \
+  SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu-reconfigure.stat" \
+  SYSTEM_STATS_MEMINFO_FRAMES="$test_dir/fixtures/ram-reconfigure.meminfo" \
+  SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu.inventory" \
+  SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu.presence" \
+  SYSTEM_STATS_INTERVAL_MS=100 \
+  QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color --path "$test_dir/relocation-shell.qml" 2>&1) || {
+    printf '%s\n' "$relocation_output"
+    exit 1
+  }
+printf '%s\n' "$relocation_output"
+grep -Fq "TEST-PASS: Nvidia UUID rebinds after its PCI address changes" \
+  <<<"$relocation_output"
+
 cp "$repo_root/tests/qml/nvidia_widget_harness.qml" "$test_dir/widget-shell.qml"
 cp "$repo_root/tests/fixtures/gpu/multiple-nvidia-swapped.inventory" \
   "$test_dir/fixtures/gpu.inventory"
