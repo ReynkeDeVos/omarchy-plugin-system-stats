@@ -1,0 +1,5 @@
+drm-driver: amdgpu
+drm-pdev: 0000:03:00.0
+drm-client-id: 12
+drm-memory-vram: 8192 MiB
+drm-resident-vram: 7168 MiB

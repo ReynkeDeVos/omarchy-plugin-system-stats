@@ -13,6 +13,8 @@ trap cleanup EXIT
 mkdir -p "$test_dir/bin" "$test_dir/fixtures"
 cp "$repo_root/Service.qml" "$test_dir/Service.qml"
 cp "$repo_root/tests/qml/intel_gpu_harness.qml" "$test_dir/shell.qml"
+cp "$repo_root/tests/qml/GpuSessionHarness.qml" "$test_dir/"
+cp "$repo_root/tests/qml/gpu_harness_assertions.js" "$test_dir/"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/bin/system-stats-helper"
 cp "$repo_root/tests/fixtures/cpu/normal.stat" "$test_dir/fixtures/cpu.stat"
 cp "$repo_root/tests/fixtures/ram/normal.meminfo" "$test_dir/fixtures/ram.meminfo"

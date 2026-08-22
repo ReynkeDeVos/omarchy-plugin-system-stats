@@ -1,0 +1,4 @@
+drm-driver: amdgpu
+drm-pdev: 0000:03:00.0
+drm-client-id: 8
+drm-engine-gfx: 100000000 ns

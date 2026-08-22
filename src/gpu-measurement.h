@@ -9,7 +9,8 @@
 
 typedef struct {
   const char *proc_root;
-  const char *fixture_proc_frames_root;
+  const char *fixture_intel_proc_frames_root;
+  const char *fixture_amd_proc_frames_root;
   const char *event_source_root;
   const char *pci_devices_root;
   bool fixture_system;

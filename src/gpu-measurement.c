@@ -16,28 +16,29 @@
 #include <unistd.h>
 
 enum {
-  INTEL_MAX_CLIENTS = 256,
-  INTEL_MAX_ENGINES = 16,
-  INTEL_ENGINE_NAME_SIZE = 64,
+  DRM_MAX_CLIENTS = 256,
+  DRM_MAX_ENGINES = 16,
+  DRM_ENGINE_NAME_SIZE = 64,
   INTEL_MAX_PMU_EVENTS = 32
 };
 
 typedef enum {
-  INTEL_DRIVER_UNKNOWN,
-  INTEL_DRIVER_I915,
-  INTEL_DRIVER_XE
-} IntelDriver;
+  DRM_DRIVER_UNKNOWN,
+  DRM_DRIVER_I915,
+  DRM_DRIVER_XE,
+  DRM_DRIVER_AMDGPU
+} DrmDriver;
 
 typedef enum {
-  INTEL_SCAN_OK,
-  INTEL_SCAN_PERMISSION_DENIED,
-  INTEL_SCAN_UNREADABLE,
-  INTEL_SCAN_UNKNOWN_ABI,
-  INTEL_SCAN_INSUFFICIENT_VISIBILITY
-} IntelScanResult;
+  DRM_SCAN_OK,
+  DRM_SCAN_PERMISSION_DENIED,
+  DRM_SCAN_UNREADABLE,
+  DRM_SCAN_UNKNOWN_ABI,
+  DRM_SCAN_INSUFFICIENT_VISIBILITY
+} DrmScanResult;
 
 typedef struct {
-  char name[INTEL_ENGINE_NAME_SIZE];
+  char name[DRM_ENGINE_NAME_SIZE];
   uint64_t busy;
   uint64_t total;
   unsigned int capacity;
@@ -45,22 +46,22 @@ typedef struct {
   bool has_total;
   bool has_engine_time;
   bool has_cycles;
-} IntelEngineCounters;
+} DrmEngineCounters;
 
 typedef struct {
   uint64_t client_id;
-  IntelDriver driver;
+  DrmDriver driver;
   size_t engine_count;
-  IntelEngineCounters engines[INTEL_MAX_ENGINES];
-} IntelClientCounters;
+  DrmEngineCounters engines[DRM_MAX_ENGINES];
+} DrmClientCounters;
 
 typedef struct {
-  IntelDriver driver;
+  DrmDriver driver;
   bool saw_target;
   bool saw_engine_counter;
   size_t client_count;
-  IntelClientCounters clients[INTEL_MAX_CLIENTS];
-} IntelSnapshot;
+  DrmClientCounters clients[DRM_MAX_CLIENTS];
+} DrmSnapshot;
 
 typedef enum {
   INTEL_PATH_NONE,
@@ -69,28 +70,81 @@ typedef enum {
   INTEL_PATH_XE_FDINFO
 } IntelPath;
 
-struct GpuMeasurement {
-  GpuMeasurementOptions options;
+typedef enum {
+  AMD_PATH_NONE,
+  AMD_PATH_GPU_BUSY_PERCENT,
+  AMD_PATH_FDINFO
+} AmdPath;
+
+typedef enum {
+  METRIC_ERROR_NONE,
+  METRIC_ERROR_COUNTER_RESET,
+  METRIC_ERROR_DEVICE_MISSING,
+  METRIC_ERROR_DEVICE_SUSPENDED,
+  METRIC_ERROR_INSUFFICIENT_VISIBILITY,
+  METRIC_ERROR_MALFORMED_COUNTER,
+  METRIC_ERROR_NO_TRUE_ENGINE_PATH,
+  METRIC_ERROR_PERMISSION_DENIED,
+  METRIC_ERROR_SOURCE_UNREADABLE,
+  METRIC_ERROR_UNSUPPORTED_DEVICE
+} MetricErrorCode;
+
+typedef struct {
+  MetricErrorCode code;
+  const char *path;
+  int64_t since_ms;
+} MetricError;
+
+typedef struct {
   IntelPath path;
-  IntelSnapshot baseline;
+  DrmSnapshot baseline;
   struct timespec baseline_at;
   size_t pmu_event_count;
   int pmu_fds[INTEL_MAX_PMU_EVENTS];
   uint64_t pmu_baseline[INTEL_MAX_PMU_EVENTS];
   unsigned int next_fixture_frame;
+} IntelReaderState;
+
+typedef struct {
+  AmdPath path;
+  DrmSnapshot baseline;
+  struct timespec baseline_at;
+  unsigned int next_fixture_frame;
+} AmdReaderState;
+
+typedef struct GpuReader GpuReader;
+
+typedef struct {
+  GpuVendor vendor;
+  void (*open)(GpuReader *reader, struct timespec now);
+  GpuObservation (*observe)(GpuReader *reader, struct timespec now);
+  void (*close)(GpuReader *reader);
+} GpuAdapter;
+
+struct GpuReader {
+  const GpuMeasurementOptions *options;
+  const GpuAdapter *adapter;
   char selected_stable_id[GPU_STABLE_ID_SIZE];
   char selected_pci_bdf[GPU_PCI_BDF_SIZE];
-  const char *failure_code;
-  const char *failure_path;
-  int64_t failure_since_ms;
+  MetricError failure;
+  union {
+    IntelReaderState intel;
+    AmdReaderState amd;
+  } state;
 };
 
-static void close_pmu(GpuMeasurement *measurement) {
-  for (size_t i = 0; i < measurement->pmu_event_count; i++) {
-    if (measurement->pmu_fds[i] >= 0)
-      close(measurement->pmu_fds[i]);
+struct GpuMeasurement {
+  GpuMeasurementOptions options;
+  GpuReader reader;
+};
+
+static void close_pmu(GpuReader *reader) {
+  IntelReaderState *state = &reader->state.intel;
+  for (size_t i = 0; i < state->pmu_event_count; i++) {
+    if (state->pmu_fds[i] >= 0)
+      close(state->pmu_fds[i]);
   }
-  measurement->pmu_event_count = 0;
+  state->pmu_event_count = 0;
 }
 
 static int64_t monotonic_ms(struct timespec instant) {
@@ -101,9 +155,9 @@ static int64_t elapsed_ms(struct timespec before, struct timespec after) {
   return monotonic_ms(after) - monotonic_ms(before);
 }
 
-static struct timespec baseline_instant(const GpuMeasurement *measurement,
+static struct timespec baseline_instant(const GpuReader *reader,
                                         struct timespec requested) {
-  if (measurement->options.fixture_system)
+  if (reader->options->fixture_system)
     return requested;
   struct timespec observed;
   return clock_gettime(CLOCK_MONOTONIC, &observed) == 0 ? observed : requested;
@@ -162,31 +216,33 @@ static bool parse_uint64(const char *value, uint64_t *parsed,
   return true;
 }
 
-static IntelEngineCounters *find_engine(IntelClientCounters *client,
-                                        const char *name, bool create) {
+static DrmEngineCounters *find_engine(DrmClientCounters *client,
+                                      const char *name, bool create) {
   for (size_t i = 0; i < client->engine_count; i++) {
     if (strcmp(client->engines[i].name, name) == 0)
       return &client->engines[i];
   }
-  if (!create || client->engine_count >= INTEL_MAX_ENGINES || name[0] == '\0' ||
-      strlen(name) >= INTEL_ENGINE_NAME_SIZE)
+  if (!create || client->engine_count >= DRM_MAX_ENGINES || name[0] == '\0' ||
+      strlen(name) >= DRM_ENGINE_NAME_SIZE)
     return NULL;
-  IntelEngineCounters *engine = &client->engines[client->engine_count++];
-  *engine = (IntelEngineCounters){.capacity = 1};
+  DrmEngineCounters *engine = &client->engines[client->engine_count++];
+  *engine = (DrmEngineCounters){.capacity = 1};
   memcpy(engine->name, name, strlen(name) + 1);
   return engine;
 }
 
-static IntelDriver parse_driver(const char *value) {
+static DrmDriver parse_driver(const char *value) {
   if (strcmp(value, "i915") == 0)
-    return INTEL_DRIVER_I915;
+    return DRM_DRIVER_I915;
   if (strcmp(value, "xe") == 0)
-    return INTEL_DRIVER_XE;
-  return INTEL_DRIVER_UNKNOWN;
+    return DRM_DRIVER_XE;
+  if (strcmp(value, "amdgpu") == 0)
+    return DRM_DRIVER_AMDGPU;
+  return DRM_DRIVER_UNKNOWN;
 }
 
 static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
-                              IntelClientCounters *client, bool *is_target,
+                              DrmClientCounters *client, bool *is_target,
                               bool *unknown_abi) {
   FILE *stream = fopen(path, "re");
   if (stream == NULL)
@@ -228,7 +284,7 @@ static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
       }
       has_client_id = true;
     } else if (strncmp(line, "drm-engine-capacity-", 20) == 0) {
-      IntelEngineCounters *engine = find_engine(client, line + 20, true);
+      DrmEngineCounters *engine = find_engine(client, line + 20, true);
       uint64_t number = 0;
       const char *suffix = NULL;
       if (engine == NULL || !parse_uint64(value, &number, &suffix) ||
@@ -238,7 +294,7 @@ static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
       }
       engine->capacity = (unsigned int)number;
     } else if (strncmp(line, "drm-engine-", 11) == 0) {
-      IntelEngineCounters *engine = find_engine(client, line + 11, true);
+      DrmEngineCounters *engine = find_engine(client, line + 11, true);
       uint64_t number = 0;
       const char *suffix = NULL;
       if (engine == NULL || !parse_uint64(value, &number, &suffix) ||
@@ -250,7 +306,7 @@ static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
       engine->has_busy = true;
       engine->has_engine_time = true;
     } else if (strncmp(line, "drm-total-cycles-", 17) == 0) {
-      IntelEngineCounters *engine = find_engine(client, line + 17, true);
+      DrmEngineCounters *engine = find_engine(client, line + 17, true);
       uint64_t number = 0;
       const char *suffix = NULL;
       if (engine == NULL || !parse_uint64(value, &number, &suffix) ||
@@ -261,7 +317,7 @@ static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
       engine->total = number;
       engine->has_total = true;
     } else if (strncmp(line, "drm-cycles-", 11) == 0) {
-      IntelEngineCounters *engine = find_engine(client, line + 11, true);
+      DrmEngineCounters *engine = find_engine(client, line + 11, true);
       uint64_t number = 0;
       const char *suffix = NULL;
       if (engine == NULL || !parse_uint64(value, &number, &suffix) ||
@@ -283,23 +339,25 @@ static bool parse_fdinfo_file(const char *path, const char *selected_pci_bdf,
   if (!*is_target)
     return true;
   client->driver = parse_driver(driver_text);
-  if (malformed || client->driver == INTEL_DRIVER_UNKNOWN || !has_client_id)
+  if (malformed || client->driver == DRM_DRIVER_UNKNOWN || !has_client_id)
     *unknown_abi = true;
   for (size_t i = 0; i < client->engine_count; i++) {
-    const IntelEngineCounters *engine = &client->engines[i];
-    if ((client->driver == INTEL_DRIVER_I915 &&
+    const DrmEngineCounters *engine = &client->engines[i];
+    if ((client->driver == DRM_DRIVER_I915 &&
          (engine->has_cycles || engine->has_total)) ||
-        (client->driver == INTEL_DRIVER_XE &&
+        (client->driver == DRM_DRIVER_XE &&
          (engine->has_engine_time ||
-          engine->has_cycles != engine->has_total))) {
+          engine->has_cycles != engine->has_total)) ||
+        (client->driver == DRM_DRIVER_AMDGPU &&
+         (engine->has_cycles || engine->has_total))) {
       *unknown_abi = true;
     }
   }
   return true;
 }
 
-static IntelClientCounters *find_client(IntelSnapshot *snapshot,
-                                        uint64_t client_id) {
+static DrmClientCounters *find_client(DrmSnapshot *snapshot,
+                                      uint64_t client_id) {
   for (size_t i = 0; i < snapshot->client_count; i++) {
     if (snapshot->clients[i].client_id == client_id)
       return &snapshot->clients[i];
@@ -307,8 +365,8 @@ static IntelClientCounters *find_client(IntelSnapshot *snapshot,
   return NULL;
 }
 
-static const IntelClientCounters *
-find_const_client(const IntelSnapshot *snapshot, uint64_t client_id) {
+static const DrmClientCounters *find_const_client(const DrmSnapshot *snapshot,
+                                                  uint64_t client_id) {
   for (size_t i = 0; i < snapshot->client_count; i++) {
     if (snapshot->clients[i].client_id == client_id)
       return &snapshot->clients[i];
@@ -316,11 +374,11 @@ find_const_client(const IntelSnapshot *snapshot, uint64_t client_id) {
   return NULL;
 }
 
-static bool merge_client(IntelSnapshot *snapshot,
-                         const IntelClientCounters *candidate) {
-  IntelClientCounters *client = find_client(snapshot, candidate->client_id);
+static bool merge_client(DrmSnapshot *snapshot,
+                         const DrmClientCounters *candidate) {
+  DrmClientCounters *client = find_client(snapshot, candidate->client_id);
   if (client == NULL) {
-    if (snapshot->client_count >= INTEL_MAX_CLIENTS)
+    if (snapshot->client_count >= DRM_MAX_CLIENTS)
       return false;
     snapshot->clients[snapshot->client_count++] = *candidate;
     return true;
@@ -328,8 +386,8 @@ static bool merge_client(IntelSnapshot *snapshot,
   if (client->driver != candidate->driver)
     return false;
   for (size_t i = 0; i < candidate->engine_count; i++) {
-    const IntelEngineCounters *source = &candidate->engines[i];
-    IntelEngineCounters *destination = find_engine(client, source->name, true);
+    const DrmEngineCounters *source = &candidate->engines[i];
+    DrmEngineCounters *destination = find_engine(client, source->name, true);
     if (destination == NULL || destination->capacity != source->capacity)
       return false;
     if (source->has_busy &&
@@ -348,25 +406,25 @@ static bool merge_client(IntelSnapshot *snapshot,
   return true;
 }
 
-static IntelScanResult visibility_override(const char *root) {
+static DrmScanResult visibility_override(const char *root) {
   char path[PATH_MAX];
   if (snprintf(path, sizeof(path), "%s/.visibility", root) >= (int)sizeof(path))
-    return INTEL_SCAN_UNREADABLE;
+    return DRM_SCAN_UNREADABLE;
   FILE *stream = fopen(path, "re");
   if (stream == NULL)
-    return INTEL_SCAN_OK;
+    return DRM_SCAN_OK;
   char value[64] = {0};
   bool read = fgets(value, sizeof(value), stream) != NULL;
   fclose(stream);
   if (!read)
-    return INTEL_SCAN_UNREADABLE;
+    return DRM_SCAN_UNREADABLE;
   trim(value);
   if (strcmp(value, "complete") == 0)
-    return INTEL_SCAN_OK;
+    return DRM_SCAN_OK;
   if (strcmp(value, "permissionDenied") == 0)
-    return INTEL_SCAN_PERMISSION_DENIED;
-  return strcmp(value, "insufficient") == 0 ? INTEL_SCAN_INSUFFICIENT_VISIBILITY
-                                            : INTEL_SCAN_UNREADABLE;
+    return DRM_SCAN_PERMISSION_DENIED;
+  return strcmp(value, "insufficient") == 0 ? DRM_SCAN_INSUFFICIENT_VISIBILITY
+                                            : DRM_SCAN_UNREADABLE;
 }
 
 static bool read_text_file(const char *path, char *buffer, size_t capacity) {
@@ -395,8 +453,8 @@ static bool device_uses_driver(const char *pci_devices_root,
   return strcmp(name, driver) == 0;
 }
 
-static bool uniquely_bound_i915(const GpuMeasurement *measurement) {
-  DIR *devices = opendir(measurement->options.pci_devices_root);
+static bool uniquely_bound_i915(const GpuReader *reader) {
+  DIR *devices = opendir(reader->options->pci_devices_root);
   if (devices == NULL)
     return false;
   size_t count = 0;
@@ -404,11 +462,11 @@ static bool uniquely_bound_i915(const GpuMeasurement *measurement) {
   struct dirent *entry;
   while ((entry = readdir(devices)) != NULL) {
     if (!pci_bdf_name(entry->d_name) ||
-        !device_uses_driver(measurement->options.pci_devices_root,
-                            entry->d_name, "i915"))
+        !device_uses_driver(reader->options->pci_devices_root, entry->d_name,
+                            "i915"))
       continue;
     count++;
-    if (strcmp(entry->d_name, measurement->selected_pci_bdf) == 0)
+    if (strcmp(entry->d_name, reader->selected_pci_bdf) == 0)
       selected_found = true;
   }
   closedir(devices);
@@ -455,15 +513,15 @@ typedef enum {
   PMU_OPEN_UNKNOWN_ABI
 } PmuOpenResult;
 
-static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
-                                   struct timespec now) {
-  if (!uniquely_bound_i915(measurement))
+static PmuOpenResult open_i915_pmu(GpuReader *reader, struct timespec now) {
+  IntelReaderState *state = &reader->state.intel;
+  if (!uniquely_bound_i915(reader))
     return PMU_OPEN_UNAVAILABLE;
 
   char root[PATH_MAX];
   char path[PATH_MAX];
   if (snprintf(root, sizeof(root), "%s/i915",
-               measurement->options.event_source_root) >= (int)sizeof(root) ||
+               reader->options->event_source_root) >= (int)sizeof(root) ||
       snprintf(path, sizeof(path), "%s/type", root) >= (int)sizeof(path))
     return PMU_OPEN_UNAVAILABLE;
   char text[128] = {0};
@@ -498,7 +556,7 @@ static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
     if (!suffix_matches(entry->d_name, "-busy"))
       continue;
     eligible_events++;
-    if (measurement->pmu_event_count >= INTEL_MAX_PMU_EVENTS) {
+    if (state->pmu_event_count >= INTEL_MAX_PMU_EVENTS) {
       event_failed = true;
       continue;
     }
@@ -536,36 +594,36 @@ static PmuOpenResult open_i915_pmu(GpuMeasurement *measurement,
       event_failed = true;
       continue;
     }
-    size_t index = measurement->pmu_event_count++;
-    measurement->pmu_fds[index] = descriptor;
-    measurement->pmu_baseline[index] = baseline;
+    size_t index = state->pmu_event_count++;
+    state->pmu_fds[index] = descriptor;
+    state->pmu_baseline[index] = baseline;
   }
   closedir(events);
 
   if (eligible_events > 0 && !event_failed &&
-      measurement->pmu_event_count == eligible_events) {
-    measurement->path = INTEL_PATH_I915_PMU;
-    measurement->baseline_at = baseline_instant(measurement, now);
+      state->pmu_event_count == eligible_events) {
+    state->path = INTEL_PATH_I915_PMU;
+    state->baseline_at = baseline_instant(reader, now);
     return PMU_OPEN_OK;
   }
-  close_pmu(measurement);
+  close_pmu(reader);
   if (permission_denied)
     return PMU_OPEN_PERMISSION_DENIED;
   return event_failed ? PMU_OPEN_UNKNOWN_ABI : PMU_OPEN_UNAVAILABLE;
 }
 
-static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
-                                 bool fixture, IntelSnapshot *snapshot) {
-  *snapshot = (IntelSnapshot){0};
-  IntelScanResult override =
-      fixture ? visibility_override(root) : INTEL_SCAN_OK;
-  if (override != INTEL_SCAN_OK)
+static DrmScanResult scan_drm_fdinfo(const char *root,
+                                     const char *selected_pci_bdf, bool fixture,
+                                     DrmSnapshot *snapshot) {
+  *snapshot = (DrmSnapshot){0};
+  DrmScanResult override = fixture ? visibility_override(root) : DRM_SCAN_OK;
+  if (override != DRM_SCAN_OK)
     return override;
 
   DIR *processes = opendir(root);
   if (processes == NULL) {
-    return errno == EACCES || errno == EPERM ? INTEL_SCAN_PERMISSION_DENIED
-                                             : INTEL_SCAN_UNREADABLE;
+    return errno == EACCES || errno == EPERM ? DRM_SCAN_PERMISSION_DENIED
+                                             : DRM_SCAN_UNREADABLE;
   }
 
   bool visibility_incomplete = false;
@@ -596,7 +654,7 @@ static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
         unknown_abi = true;
         continue;
       }
-      IntelClientCounters candidate = {0};
+      DrmClientCounters candidate = {0};
       bool is_target = false;
       if (!parse_fdinfo_file(path, selected_pci_bdf, &candidate, &is_target,
                              &unknown_abi)) {
@@ -607,9 +665,9 @@ static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
       if (!is_target)
         continue;
       snapshot->saw_target = true;
-      if (candidate.driver == INTEL_DRIVER_UNKNOWN)
+      if (candidate.driver == DRM_DRIVER_UNKNOWN)
         continue;
-      if (snapshot->driver == INTEL_DRIVER_UNKNOWN)
+      if (snapshot->driver == DRM_DRIVER_UNKNOWN)
         snapshot->driver = candidate.driver;
       if (snapshot->driver != candidate.driver ||
           !merge_client(snapshot, &candidate)) {
@@ -617,9 +675,11 @@ static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
         continue;
       }
       for (size_t i = 0; i < candidate.engine_count; i++) {
-        if ((candidate.driver == INTEL_DRIVER_I915 &&
+        if ((candidate.driver == DRM_DRIVER_I915 &&
              candidate.engines[i].has_engine_time) ||
-            (candidate.driver == INTEL_DRIVER_XE &&
+            (candidate.driver == DRM_DRIVER_AMDGPU &&
+             candidate.engines[i].has_engine_time) ||
+            (candidate.driver == DRM_DRIVER_XE &&
              candidate.engines[i].has_cycles &&
              candidate.engines[i].has_total)) {
           snapshot->saw_engine_counter = true;
@@ -631,155 +691,496 @@ static IntelScanResult scan_proc(const char *root, const char *selected_pci_bdf,
   closedir(processes);
 
   if (unknown_abi)
-    return INTEL_SCAN_UNKNOWN_ABI;
+    return DRM_SCAN_UNKNOWN_ABI;
   if (visibility_incomplete)
-    return INTEL_SCAN_INSUFFICIENT_VISIBILITY;
-  return INTEL_SCAN_OK;
+    return DRM_SCAN_INSUFFICIENT_VISIBILITY;
+  return DRM_SCAN_OK;
 }
 
-static const char *fixture_frame_root(GpuMeasurement *measurement,
+static const char *fixture_frame_root(const char *fixture_root,
+                                      const char *live_root,
+                                      unsigned int *next_frame,
                                       char path[PATH_MAX]) {
-  const char *root = measurement->options.fixture_proc_frames_root;
-  if (root == NULL)
-    return measurement->options.proc_root;
-  unsigned int frame = measurement->next_fixture_frame;
-  if (snprintf(path, PATH_MAX, "%s/%u", root, frame) >= PATH_MAX)
+  if (fixture_root == NULL)
+    return live_root;
+  unsigned int frame = *next_frame;
+  if (snprintf(path, PATH_MAX, "%s/%u", fixture_root, frame) >= PATH_MAX)
     return NULL;
   DIR *directory = opendir(path);
   if (directory != NULL) {
     closedir(directory);
-    measurement->next_fixture_frame++;
+    (*next_frame)++;
     return path;
   }
   if (frame == 0 ||
-      snprintf(path, PATH_MAX, "%s/%u", root, frame - 1) >= PATH_MAX)
+      snprintf(path, PATH_MAX, "%s/%u", fixture_root, frame - 1) >= PATH_MAX)
     return NULL;
   return path;
 }
 
-static IntelScanResult scan_next_frame(GpuMeasurement *measurement,
-                                       IntelSnapshot *snapshot) {
+static DrmScanResult scan_next_frame(GpuReader *reader,
+                                     const char *fixture_root,
+                                     unsigned int *next_frame,
+                                     DrmSnapshot *snapshot) {
   char frame_path[PATH_MAX];
-  const char *root = fixture_frame_root(measurement, frame_path);
+  const char *root = fixture_frame_root(
+      fixture_root, reader->options->proc_root, next_frame, frame_path);
   if (root == NULL)
-    return INTEL_SCAN_UNREADABLE;
-  return scan_proc(root, measurement->selected_pci_bdf,
-                   measurement->options.fixture_proc_frames_root != NULL,
-                   snapshot);
+    return DRM_SCAN_UNREADABLE;
+  return scan_drm_fdinfo(root, reader->selected_pci_bdf, fixture_root != NULL,
+                         snapshot);
 }
 
-static void record_failure(GpuMeasurement *measurement, const char *code,
+static const char *metric_error_name(MetricErrorCode code) {
+  switch (code) {
+  case METRIC_ERROR_COUNTER_RESET:
+    return "counterReset";
+  case METRIC_ERROR_DEVICE_MISSING:
+    return "deviceMissing";
+  case METRIC_ERROR_DEVICE_SUSPENDED:
+    return "deviceSuspended";
+  case METRIC_ERROR_INSUFFICIENT_VISIBILITY:
+    return "insufficientVisibility";
+  case METRIC_ERROR_MALFORMED_COUNTER:
+    return "malformedCounter";
+  case METRIC_ERROR_NO_TRUE_ENGINE_PATH:
+    return "noTrueEnginePath";
+  case METRIC_ERROR_PERMISSION_DENIED:
+    return "permissionDenied";
+  case METRIC_ERROR_SOURCE_UNREADABLE:
+    return "sourceUnreadable";
+  case METRIC_ERROR_UNSUPPORTED_DEVICE:
+    return "unsupportedDevice";
+  case METRIC_ERROR_NONE:
+    return NULL;
+  }
+  return NULL;
+}
+
+static const char *metric_error_retryability(MetricErrorCode code) {
+  return code == METRIC_ERROR_UNSUPPORTED_DEVICE ||
+                 code == METRIC_ERROR_NO_TRUE_ENGINE_PATH
+             ? "nonRetryable"
+             : "retryable";
+}
+
+static void clear_failure(GpuReader *reader) {
+  reader->failure = (MetricError){0};
+}
+
+static void record_failure(GpuReader *reader, MetricErrorCode code,
                            const char *path, struct timespec now) {
-  if (measurement->failure_code == NULL ||
-      strcmp(measurement->failure_code, code) != 0 ||
-      measurement->failure_path == NULL ||
-      strcmp(measurement->failure_path, path) != 0) {
-    measurement->failure_since_ms = monotonic_ms(now);
+  if (reader->failure.code != code || reader->failure.path == NULL ||
+      strcmp(reader->failure.path, path) != 0) {
+    reader->failure.since_ms = monotonic_ms(now);
   }
-  measurement->failure_code = code;
-  measurement->failure_path = path;
+  reader->failure.code = code;
+  reader->failure.path = path;
 }
 
-static void prepare_fdinfo(GpuMeasurement *measurement, struct timespec now) {
-  measurement->path = INTEL_PATH_NONE;
-  IntelSnapshot baseline = {0};
-  IntelScanResult result = scan_next_frame(measurement, &baseline);
-  if (result == INTEL_SCAN_PERMISSION_DENIED) {
-    record_failure(measurement, "permissionDenied", "intel-fdinfo", now);
-  } else if (result == INTEL_SCAN_INSUFFICIENT_VISIBILITY) {
-    record_failure(measurement, "insufficientVisibility", "intel-fdinfo", now);
-  } else if (result == INTEL_SCAN_UNKNOWN_ABI ||
-             (result == INTEL_SCAN_OK && baseline.saw_target &&
-              !baseline.saw_engine_counter)) {
-    record_failure(measurement, "unsupportedDevice", "intel-fdinfo", now);
-  } else if (result != INTEL_SCAN_OK || !baseline.saw_target) {
-    record_failure(measurement, "noTrueEnginePath", "intel-measurement", now);
-  } else if (baseline.driver == INTEL_DRIVER_I915) {
-    measurement->path = INTEL_PATH_I915_FDINFO;
-    measurement->baseline = baseline;
-    measurement->baseline_at = baseline_instant(measurement, now);
-    measurement->failure_code = NULL;
-    measurement->failure_path = NULL;
-  } else if (baseline.driver == INTEL_DRIVER_XE) {
-    measurement->path = INTEL_PATH_XE_FDINFO;
-    measurement->baseline = baseline;
-    measurement->baseline_at = baseline_instant(measurement, now);
-    measurement->failure_code = NULL;
-    measurement->failure_path = NULL;
+static void copy_reader_identity(GpuObservation *observation,
+                                 const GpuReader *reader) {
+  snprintf(observation->stable_id, sizeof(observation->stable_id), "%s",
+           reader->selected_stable_id);
+  snprintf(observation->pci_bdf, sizeof(observation->pci_bdf), "%s",
+           reader->selected_pci_bdf);
+}
+
+static GpuObservation available_observation(GpuReader *reader, int percent,
+                                            struct timespec now,
+                                            int64_t window_ms,
+                                            const char *path) {
+  GpuObservation observation = {
+      .handled = true,
+      .available = true,
+      .percent = percent,
+      .sampled_at_ms = monotonic_ms(now),
+      .window_ms = window_ms,
+      .path = path,
+      .evidence = "fixtureTested",
+  };
+  copy_reader_identity(&observation, reader);
+  return observation;
+}
+
+static GpuObservation unavailable_observation(GpuReader *reader,
+                                              MetricErrorCode code,
+                                              const char *path,
+                                              const char *diagnostic,
+                                              struct timespec now) {
+  record_failure(reader, code, path, now);
+  GpuObservation observation = {
+      .handled = true,
+      .available = false,
+      .error_code = metric_error_name(code),
+      .retryability = metric_error_retryability(code),
+      .diagnostic = diagnostic,
+      .path = path,
+      .evidence = "fixtureTested",
+      .since_ms = reader->failure.since_ms,
+  };
+  copy_reader_identity(&observation, reader);
+  return observation;
+}
+
+static MetricErrorCode drm_scan_error(DrmScanResult result,
+                                      MetricErrorCode unreadable_error) {
+  switch (result) {
+  case DRM_SCAN_PERMISSION_DENIED:
+    return METRIC_ERROR_PERMISSION_DENIED;
+  case DRM_SCAN_INSUFFICIENT_VISIBILITY:
+    return METRIC_ERROR_INSUFFICIENT_VISIBILITY;
+  case DRM_SCAN_UNKNOWN_ABI:
+    return METRIC_ERROR_UNSUPPORTED_DEVICE;
+  case DRM_SCAN_UNREADABLE:
+    return unreadable_error;
+  case DRM_SCAN_OK:
+    return METRIC_ERROR_NONE;
+  }
+  return unreadable_error;
+}
+
+static const char *amd_diagnostic(MetricErrorCode code) {
+  switch (code) {
+  case METRIC_ERROR_DEVICE_MISSING:
+    return "the selected AMD device is no longer present";
+  case METRIC_ERROR_DEVICE_SUSPENDED:
+    return "the selected AMD device is runtime-suspended";
+  case METRIC_ERROR_PERMISSION_DENIED:
+    return "AMD engine counters could not be read with current permissions";
+  case METRIC_ERROR_INSUFFICIENT_VISIBILITY:
+    return "process visibility is insufficient for a system-wide AMD fdinfo "
+           "value";
+  case METRIC_ERROR_UNSUPPORTED_DEVICE:
+    return "the selected AMD device exposes an unknown counter ABI";
+  case METRIC_ERROR_COUNTER_RESET:
+    return "AMD engine counters decreased during the observation window";
+  case METRIC_ERROR_SOURCE_UNREADABLE:
+    return "AMD engine counters could not be read";
+  case METRIC_ERROR_MALFORMED_COUNTER:
+    return "the selected AMD GPU load sensor returned an invalid percentage";
+  case METRIC_ERROR_NO_TRUE_ENGINE_PATH:
+  case METRIC_ERROR_NONE:
+    return "no documented AMD engine counter is available";
+  }
+  return "no documented AMD engine counter is available";
+}
+
+static GpuObservation amd_unavailable_observation(GpuReader *reader,
+                                                  MetricErrorCode code,
+                                                  const char *path,
+                                                  struct timespec now) {
+  return unavailable_observation(reader, code, path, amd_diagnostic(code), now);
+}
+
+static GpuObservation amd_failure_observation(GpuReader *reader,
+                                              struct timespec now) {
+  MetricErrorCode code = reader->failure.code == METRIC_ERROR_NONE
+                             ? METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                             : reader->failure.code;
+  const char *path =
+      reader->failure.path == NULL ? "amd-measurement" : reader->failure.path;
+  return amd_unavailable_observation(reader, code, path, now);
+}
+
+static bool amd_runtime_suspended(GpuReader *reader) {
+  char path[PATH_MAX];
+  char status[32] = {0};
+  if (snprintf(path, sizeof(path), "%s/%s/power/runtime_status",
+               reader->options->pci_devices_root,
+               reader->selected_pci_bdf) >= (int)sizeof(path) ||
+      !read_text_file(path, status, sizeof(status))) {
+    return false;
+  }
+  return strcmp(status, "suspended") == 0 || strcmp(status, "suspending") == 0;
+}
+
+static GpuObservation amd_sysfs_error_observation(GpuReader *reader,
+                                                  int error_number,
+                                                  struct timespec now) {
+  if (error_number == EOPNOTSUPP) {
+    return amd_unavailable_observation(reader, METRIC_ERROR_UNSUPPORTED_DEVICE,
+                                       "amd-gpu-busy-percent", now);
+  }
+  if (error_number == EACCES) {
+    return amd_unavailable_observation(reader, METRIC_ERROR_PERMISSION_DENIED,
+                                       "amd-gpu-busy-percent", now);
+  }
+  if (error_number == EPERM) {
+    if (amd_runtime_suspended(reader)) {
+      return amd_unavailable_observation(reader, METRIC_ERROR_DEVICE_SUSPENDED,
+                                         "amd-gpu-busy-percent", now);
+    }
+    return amd_unavailable_observation(reader, METRIC_ERROR_SOURCE_UNREADABLE,
+                                       "amd-gpu-busy-percent", now);
+  }
+  if (error_number == ENOENT || error_number == ENODEV ||
+      error_number == ENXIO || error_number == EIO) {
+    return amd_unavailable_observation(reader, METRIC_ERROR_DEVICE_MISSING,
+                                       "amd-gpu-busy-percent", now);
+  }
+  return amd_unavailable_observation(reader, METRIC_ERROR_SOURCE_UNREADABLE,
+                                     "amd-gpu-busy-percent", now);
+}
+
+static int amd_fixture_error(const char *text) {
+  if (strcmp(text, "error:EOPNOTSUPP") == 0 ||
+      strcmp(text, "error:ENOTSUPP") == 0)
+    return EOPNOTSUPP;
+  if (strcmp(text, "error:EACCES") == 0)
+    return EACCES;
+  if (strcmp(text, "error:EPERM") == 0)
+    return EPERM;
+  if (strcmp(text, "error:ENODEV") == 0)
+    return ENODEV;
+  if (strcmp(text, "error:ENOENT") == 0)
+    return ENOENT;
+  return 0;
+}
+
+static GpuObservation observe_amd_sysfs(GpuReader *reader,
+                                        struct timespec now) {
+  AmdReaderState *state = &reader->state.amd;
+  if (amd_runtime_suspended(reader)) {
+    return amd_unavailable_observation(reader, METRIC_ERROR_DEVICE_SUSPENDED,
+                                       "amd-gpu-busy-percent", now);
+  }
+  char path[PATH_MAX];
+  char text[64] = {0};
+  if (snprintf(path, sizeof(path), "%s/%s/gpu_busy_percent",
+               reader->options->pci_devices_root,
+               reader->selected_pci_bdf) >= (int)sizeof(path)) {
+    return amd_sysfs_error_observation(reader, ENAMETOOLONG, now);
+  }
+  FILE *stream = fopen(path, "re");
+  if (stream == NULL)
+    return amd_sysfs_error_observation(reader, errno, now);
+  errno = 0;
+  if (fgets(text, sizeof(text), stream) == NULL) {
+    int read_error = errno == 0 ? EIO : errno;
+    fclose(stream);
+    return amd_sysfs_error_observation(reader, read_error, now);
+  }
+  fclose(stream);
+  trim(text);
+
+  int fixture_error =
+      reader->options->fixture_system ? amd_fixture_error(text) : 0;
+  if (fixture_error != 0)
+    return amd_sysfs_error_observation(reader, fixture_error, now);
+
+  uint64_t value = 0;
+  const char *suffix = NULL;
+  if (!parse_uint64(text, &value, &suffix) || *suffix != '\0' || value > 100) {
+    return amd_unavailable_observation(reader, METRIC_ERROR_MALFORMED_COUNTER,
+                                       "amd-gpu-busy-percent", now);
+  }
+
+  int64_t window_ms = elapsed_ms(state->baseline_at, now);
+  state->baseline_at = now;
+  clear_failure(reader);
+  return available_observation(reader, (int)value, now, window_ms,
+                               "amd-gpu-busy-percent");
+}
+
+static bool prepare_amd_fdinfo(GpuReader *reader, struct timespec now,
+                               bool record_errors) {
+  AmdReaderState *state = &reader->state.amd;
+  state->path = AMD_PATH_NONE;
+  DrmSnapshot baseline = {0};
+  DrmScanResult result =
+      scan_next_frame(reader, reader->options->fixture_amd_proc_frames_root,
+                      &state->next_fixture_frame, &baseline);
+  if (result == DRM_SCAN_OK && baseline.saw_target &&
+      baseline.saw_engine_counter && baseline.driver == DRM_DRIVER_AMDGPU) {
+    state->path = AMD_PATH_FDINFO;
+    state->baseline = baseline;
+    state->baseline_at = baseline_instant(reader, now);
+    clear_failure(reader);
+    return true;
+  }
+  if (!record_errors)
+    return false;
+  MetricErrorCode error =
+      drm_scan_error(result, METRIC_ERROR_SOURCE_UNREADABLE);
+  if (result == DRM_SCAN_OK)
+    error = baseline.saw_target && baseline.driver != DRM_DRIVER_AMDGPU
+                ? METRIC_ERROR_UNSUPPORTED_DEVICE
+                : METRIC_ERROR_NO_TRUE_ENGINE_PATH;
+  const char *path = error == METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                         ? "amd-measurement"
+                         : "amd-fdinfo";
+  record_failure(reader, error, path, now);
+  return false;
+}
+
+static void open_amd_reader(GpuReader *reader, struct timespec now) {
+  AmdReaderState *state = &reader->state.amd;
+  char device_path[PATH_MAX];
+  char busy_path[PATH_MAX];
+  if (snprintf(device_path, sizeof(device_path), "%s/%s",
+               reader->options->pci_devices_root,
+               reader->selected_pci_bdf) >= (int)sizeof(device_path) ||
+      snprintf(busy_path, sizeof(busy_path), "%s/gpu_busy_percent",
+               device_path) >= (int)sizeof(busy_path)) {
+    record_failure(reader, METRIC_ERROR_NO_TRUE_ENGINE_PATH, "amd-measurement",
+                   now);
+    return;
+  }
+  if (access(device_path, F_OK) != 0) {
+    record_failure(reader, METRIC_ERROR_DEVICE_MISSING, "amd-gpu-busy-percent",
+                   now);
+    return;
+  }
+  if (access(busy_path, F_OK) == 0) {
+    state->path = AMD_PATH_GPU_BUSY_PERCENT;
+    state->baseline_at = baseline_instant(reader, now);
+    return;
+  }
+  if (reader->options->fixture_system &&
+      reader->options->fixture_amd_proc_frames_root == NULL) {
+    record_failure(reader, METRIC_ERROR_NO_TRUE_ENGINE_PATH, "amd-measurement",
+                   now);
+    return;
+  }
+  prepare_amd_fdinfo(reader, now, true);
+}
+
+static void prepare_intel_fdinfo(GpuReader *reader, struct timespec now) {
+  IntelReaderState *state = &reader->state.intel;
+  state->path = INTEL_PATH_NONE;
+  DrmSnapshot baseline = {0};
+  DrmScanResult result =
+      scan_next_frame(reader, reader->options->fixture_intel_proc_frames_root,
+                      &state->next_fixture_frame, &baseline);
+  if (result == DRM_SCAN_OK && baseline.saw_target &&
+      baseline.driver == DRM_DRIVER_I915 && baseline.saw_engine_counter) {
+    state->path = INTEL_PATH_I915_FDINFO;
+    state->baseline = baseline;
+    state->baseline_at = baseline_instant(reader, now);
+    clear_failure(reader);
+  } else if (result == DRM_SCAN_OK && baseline.saw_target &&
+             baseline.driver == DRM_DRIVER_XE && baseline.saw_engine_counter) {
+    state->path = INTEL_PATH_XE_FDINFO;
+    state->baseline = baseline;
+    state->baseline_at = baseline_instant(reader, now);
+    clear_failure(reader);
   } else {
-    record_failure(measurement, "unsupportedDevice", "intel-fdinfo", now);
+    MetricErrorCode error =
+        drm_scan_error(result, METRIC_ERROR_NO_TRUE_ENGINE_PATH);
+    if (result == DRM_SCAN_OK)
+      error = baseline.saw_target ? METRIC_ERROR_UNSUPPORTED_DEVICE
+                                  : METRIC_ERROR_NO_TRUE_ENGINE_PATH;
+    const char *path = error == METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                           ? "intel-measurement"
+                           : "intel-fdinfo";
+    record_failure(reader, error, path, now);
   }
 }
 
-static void prepare_intel_path(GpuMeasurement *measurement,
-                               struct timespec now) {
-  if (measurement->options.fixture_proc_frames_root != NULL) {
-    prepare_fdinfo(measurement, now);
+static void open_intel_reader(GpuReader *reader, struct timespec now) {
+  IntelReaderState *state = &reader->state.intel;
+  if (reader->options->fixture_intel_proc_frames_root != NULL) {
+    prepare_intel_fdinfo(reader, now);
     return;
   }
-  if (measurement->options.fixture_system &&
-      !measurement->options.fixture_pmu_system) {
-    record_failure(measurement, "noTrueEnginePath", "intel-measurement", now);
+  if (reader->options->fixture_system && !reader->options->fixture_pmu_system) {
+    record_failure(reader, METRIC_ERROR_NO_TRUE_ENGINE_PATH,
+                   "intel-measurement", now);
     return;
   }
 
-  PmuOpenResult pmu = open_i915_pmu(measurement, now);
+  PmuOpenResult pmu = open_i915_pmu(reader, now);
   if (pmu == PMU_OPEN_OK)
     return;
-  if (!measurement->options.fixture_system)
-    prepare_fdinfo(measurement, now);
-  if (measurement->path != INTEL_PATH_NONE)
+  if (!reader->options->fixture_system)
+    prepare_intel_fdinfo(reader, now);
+  if (state->path != INTEL_PATH_NONE)
     return;
   if (pmu == PMU_OPEN_PERMISSION_DENIED) {
-    record_failure(measurement, "permissionDenied", "intel-i915-pmu", now);
+    record_failure(reader, METRIC_ERROR_PERMISSION_DENIED, "intel-i915-pmu",
+                   now);
   } else if (pmu == PMU_OPEN_UNKNOWN_ABI) {
-    record_failure(measurement, "unsupportedDevice", "intel-i915-pmu", now);
+    record_failure(reader, METRIC_ERROR_UNSUPPORTED_DEVICE, "intel-i915-pmu",
+                   now);
   }
+}
+
+static GpuObservation observe_intel_reader(GpuReader *reader,
+                                           struct timespec now);
+static GpuObservation observe_amd_reader(GpuReader *reader,
+                                         struct timespec now);
+
+static void close_intel_reader(GpuReader *reader) { close_pmu(reader); }
+
+static const GpuAdapter GPU_ADAPTERS[] = {
+    {.vendor = GPU_VENDOR_INTEL,
+     .open = open_intel_reader,
+     .observe = observe_intel_reader,
+     .close = close_intel_reader},
+    {.vendor = GPU_VENDOR_AMD,
+     .open = open_amd_reader,
+     .observe = observe_amd_reader,
+     .close = NULL},
+};
+
+static const GpuAdapter *find_adapter(GpuVendor vendor) {
+  for (size_t i = 0; i < sizeof(GPU_ADAPTERS) / sizeof(GPU_ADAPTERS[0]); i++) {
+    if (GPU_ADAPTERS[i].vendor == vendor)
+      return &GPU_ADAPTERS[i];
+  }
+  return NULL;
+}
+
+static void close_reader(GpuReader *reader) {
+  if (reader->adapter != NULL && reader->adapter->close != NULL)
+    reader->adapter->close(reader);
 }
 
 GpuMeasurement *gpu_measurement_create(const GpuMeasurementOptions *options) {
   GpuMeasurement *measurement = calloc(1, sizeof(*measurement));
-  if (measurement != NULL)
+  if (measurement != NULL) {
     measurement->options = *options;
+    measurement->reader.options = &measurement->options;
+  }
   return measurement;
 }
 
 void gpu_measurement_destroy(GpuMeasurement *measurement) {
   if (measurement == NULL)
     return;
-  close_pmu(measurement);
+  close_reader(&measurement->reader);
   free(measurement);
 }
 
 void gpu_measurement_reconcile(GpuMeasurement *measurement,
                                const GpuDevice *selected, struct timespec now) {
+  GpuReader *reader = &measurement->reader;
   const char *stable_id = selected == NULL ? "" : selected->stable_id;
-  if (strcmp(measurement->selected_stable_id, stable_id) == 0)
+  if (strcmp(reader->selected_stable_id, stable_id) == 0)
     return;
 
-  close_pmu(measurement);
-  measurement->path = INTEL_PATH_NONE;
-  measurement->baseline = (IntelSnapshot){0};
-  measurement->next_fixture_frame = 0;
-  measurement->failure_code = NULL;
-  measurement->failure_path = NULL;
-  snprintf(measurement->selected_stable_id,
-           sizeof(measurement->selected_stable_id), "%s", stable_id);
-  snprintf(measurement->selected_pci_bdf, sizeof(measurement->selected_pci_bdf),
-           "%s", selected == NULL ? "" : selected->pci_bdf);
-  if (selected == NULL || selected->vendor != GPU_VENDOR_INTEL)
+  close_reader(reader);
+  *reader = (GpuReader){.options = &measurement->options};
+  snprintf(reader->selected_stable_id, sizeof(reader->selected_stable_id), "%s",
+           stable_id);
+  snprintf(reader->selected_pci_bdf, sizeof(reader->selected_pci_bdf), "%s",
+           selected == NULL ? "" : selected->pci_bdf);
+  if (selected == NULL)
     return;
-  prepare_intel_path(measurement, now);
+  reader->adapter = find_adapter(selected->vendor);
+  if (reader->adapter != NULL)
+    reader->adapter->open(reader, now);
 }
 
 void gpu_measurement_reset(GpuMeasurement *measurement,
                            const GpuDevice *selected, struct timespec now) {
-  measurement->selected_stable_id[0] = '\0';
+  measurement->reader.selected_stable_id[0] = '\0';
   gpu_measurement_reconcile(measurement, selected, now);
 }
 
-static const IntelEngineCounters *
-const_engine(const IntelClientCounters *client, const char *name) {
+static const DrmEngineCounters *const_engine(const DrmClientCounters *client,
+                                             const char *name) {
   for (size_t i = 0; i < client->engine_count; i++) {
     if (strcmp(client->engines[i].name, name) == 0)
       return &client->engines[i];
@@ -788,19 +1189,19 @@ const_engine(const IntelClientCounters *client, const char *name) {
 }
 
 typedef struct {
-  char name[INTEL_ENGINE_NAME_SIZE];
+  char name[DRM_ENGINE_NAME_SIZE];
   long double busy_delta;
   long double total_delta;
   unsigned int capacity;
 } EngineDelta;
 
-static EngineDelta *find_delta(EngineDelta deltas[INTEL_MAX_ENGINES],
+static EngineDelta *find_delta(EngineDelta deltas[DRM_MAX_ENGINES],
                                size_t *count, const char *name) {
   for (size_t i = 0; i < *count; i++) {
     if (strcmp(deltas[i].name, name) == 0)
       return &deltas[i];
   }
-  if (*count >= INTEL_MAX_ENGINES)
+  if (*count >= DRM_MAX_ENGINES)
     return NULL;
   EngineDelta *delta = &deltas[(*count)++];
   *delta = (EngineDelta){.capacity = 1};
@@ -808,21 +1209,21 @@ static EngineDelta *find_delta(EngineDelta deltas[INTEL_MAX_ENGINES],
   return delta;
 }
 
-static bool i915_percent(const IntelSnapshot *before,
-                         const IntelSnapshot *after, int64_t window_ms,
-                         int *percent, bool *counter_reset) {
-  EngineDelta deltas[INTEL_MAX_ENGINES] = {0};
+static bool engine_time_percent(const DrmSnapshot *before,
+                                const DrmSnapshot *after, int64_t window_ms,
+                                int *percent, bool *counter_reset) {
+  EngineDelta deltas[DRM_MAX_ENGINES] = {0};
   size_t delta_count = 0;
   bool compared = false;
   for (size_t i = 0; i < after->client_count; i++) {
-    const IntelClientCounters *current = &after->clients[i];
-    const IntelClientCounters *previous =
+    const DrmClientCounters *current = &after->clients[i];
+    const DrmClientCounters *previous =
         find_const_client(before, current->client_id);
     if (previous == NULL)
       continue;
     for (size_t j = 0; j < current->engine_count; j++) {
-      const IntelEngineCounters *engine = &current->engines[j];
-      const IntelEngineCounters *old = const_engine(previous, engine->name);
+      const DrmEngineCounters *engine = &current->engines[j];
+      const DrmEngineCounters *old = const_engine(previous, engine->name);
       if (!engine->has_busy || old == NULL || !old->has_busy)
         continue;
       compared = true;
@@ -855,20 +1256,20 @@ static bool i915_percent(const IntelSnapshot *before,
   return true;
 }
 
-static bool xe_percent(const IntelSnapshot *before, const IntelSnapshot *after,
+static bool xe_percent(const DrmSnapshot *before, const DrmSnapshot *after,
                        int *percent, bool *counter_reset) {
-  EngineDelta deltas[INTEL_MAX_ENGINES] = {0};
+  EngineDelta deltas[DRM_MAX_ENGINES] = {0};
   size_t delta_count = 0;
   bool compared = false;
   for (size_t i = 0; i < after->client_count; i++) {
-    const IntelClientCounters *current = &after->clients[i];
-    const IntelClientCounters *previous =
+    const DrmClientCounters *current = &after->clients[i];
+    const DrmClientCounters *previous =
         find_const_client(before, current->client_id);
     if (previous == NULL)
       continue;
     for (size_t j = 0; j < current->engine_count; j++) {
-      const IntelEngineCounters *engine = &current->engines[j];
-      const IntelEngineCounters *old = const_engine(previous, engine->name);
+      const DrmEngineCounters *engine = &current->engines[j];
+      const DrmEngineCounters *old = const_engine(previous, engine->name);
       if (!engine->has_busy || !engine->has_total || old == NULL ||
           !old->has_busy || !old->has_total)
         continue;
@@ -910,184 +1311,205 @@ static bool xe_percent(const IntelSnapshot *before, const IntelSnapshot *after,
   return true;
 }
 
-static GpuObservation unavailable_observation(GpuMeasurement *measurement,
-                                              struct timespec now) {
-  const char *code = measurement->failure_code == NULL
-                         ? "noTrueEnginePath"
-                         : measurement->failure_code;
-  const char *path = measurement->failure_path == NULL
-                         ? "intel-measurement"
-                         : measurement->failure_path;
-  record_failure(measurement, code, path, now);
-  const char *diagnostic = "no documented Intel engine counter is available";
-  if (strcmp(code, "permissionDenied") == 0)
-    diagnostic =
-        "Intel engine counters could not be read with current permissions";
-  else if (strcmp(code, "insufficientVisibility") == 0)
-    diagnostic =
-        "process visibility is insufficient for a system-wide fdinfo value";
-  else if (strcmp(code, "unsupportedDevice") == 0)
-    diagnostic = "the selected Intel device exposes an unknown counter ABI";
-  else if (strcmp(code, "counterReset") == 0)
-    diagnostic = "Intel engine counters reset during the observation window";
+static const char *intel_diagnostic(MetricErrorCode code) {
+  switch (code) {
+  case METRIC_ERROR_PERMISSION_DENIED:
+    return "Intel engine counters could not be read with current permissions";
+  case METRIC_ERROR_INSUFFICIENT_VISIBILITY:
+    return "process visibility is insufficient for a system-wide fdinfo value";
+  case METRIC_ERROR_UNSUPPORTED_DEVICE:
+    return "the selected Intel device exposes an unknown counter ABI";
+  case METRIC_ERROR_COUNTER_RESET:
+    return "Intel engine counters reset during the observation window";
+  default:
+    return "no documented Intel engine counter is available";
+  }
+}
 
-  GpuObservation observation = {
-      .handled = true,
-      .available = false,
-      .error_code = code,
-      .retryability = strcmp(code, "unsupportedDevice") == 0 ||
-                              strcmp(code, "noTrueEnginePath") == 0
-                          ? "nonRetryable"
-                          : "retryable",
-      .diagnostic = diagnostic,
-      .path = path,
-      .evidence = "fixtureTested",
-      .since_ms = measurement->failure_since_ms,
-  };
-  snprintf(observation.stable_id, sizeof(observation.stable_id), "%s",
-           measurement->selected_stable_id);
-  snprintf(observation.pci_bdf, sizeof(observation.pci_bdf), "%s",
-           measurement->selected_pci_bdf);
-  return observation;
+static GpuObservation intel_unavailable_observation(GpuReader *reader,
+                                                    struct timespec now) {
+  MetricErrorCode code = reader->failure.code == METRIC_ERROR_NONE
+                             ? METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                             : reader->failure.code;
+  const char *path =
+      reader->failure.path == NULL ? "intel-measurement" : reader->failure.path;
+  return unavailable_observation(reader, code, path, intel_diagnostic(code),
+                                 now);
+}
+
+static GpuObservation observe_amd_reader(GpuReader *reader,
+                                         struct timespec now) {
+  AmdReaderState *state = &reader->state.amd;
+  if (state->path == AMD_PATH_GPU_BUSY_PERCENT) {
+    GpuObservation observation = observe_amd_sysfs(reader, now);
+    if (!observation.available &&
+        reader->failure.code != METRIC_ERROR_DEVICE_SUSPENDED &&
+        reader->failure.code != METRIC_ERROR_DEVICE_MISSING &&
+        (!reader->options->fixture_system ||
+         reader->options->fixture_amd_proc_frames_root != NULL)) {
+      prepare_amd_fdinfo(reader, now, false);
+    }
+    return observation;
+  }
+  if (state->path == AMD_PATH_FDINFO) {
+    DrmSnapshot current = {0};
+    DrmScanResult scan =
+        scan_next_frame(reader, reader->options->fixture_amd_proc_frames_root,
+                        &state->next_fixture_frame, &current);
+    if (scan != DRM_SCAN_OK) {
+      record_failure(reader,
+                     drm_scan_error(scan, METRIC_ERROR_SOURCE_UNREADABLE),
+                     "amd-fdinfo", now);
+      return amd_failure_observation(reader, now);
+    }
+    if (current.driver != DRM_DRIVER_AMDGPU || !current.saw_engine_counter) {
+      record_failure(reader,
+                     current.saw_target ? METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                                        : METRIC_ERROR_SOURCE_UNREADABLE,
+                     "amd-fdinfo", now);
+      return amd_failure_observation(reader, now);
+    }
+    int64_t window_ms = elapsed_ms(state->baseline_at, now);
+    int percent = 0;
+    bool counter_reset = false;
+    bool available = engine_time_percent(&state->baseline, &current, window_ms,
+                                         &percent, &counter_reset);
+    if (!available) {
+      record_failure(reader,
+                     counter_reset ? METRIC_ERROR_COUNTER_RESET
+                                   : METRIC_ERROR_NO_TRUE_ENGINE_PATH,
+                     "amd-fdinfo", now);
+      if (!counter_reset) {
+        state->baseline = current;
+        state->baseline_at = now;
+      }
+      return amd_failure_observation(reader, now);
+    }
+    state->baseline = current;
+    state->baseline_at = now;
+    clear_failure(reader);
+    return available_observation(reader, percent, now, window_ms, "amd-fdinfo");
+  }
+  return amd_failure_observation(reader, now);
+}
+
+static GpuObservation observe_intel_reader(GpuReader *reader,
+                                           struct timespec now) {
+  IntelReaderState *state = &reader->state.intel;
+  if (state->path == INTEL_PATH_NONE) {
+    GpuObservation prior = intel_unavailable_observation(reader, now);
+    bool retryable = reader->failure.code != METRIC_ERROR_UNSUPPORTED_DEVICE &&
+                     reader->failure.code != METRIC_ERROR_NO_TRUE_ENGINE_PATH;
+    if (retryable)
+      open_intel_reader(reader, now);
+    if (state->path != INTEL_PATH_NONE)
+      return prior;
+    return intel_unavailable_observation(reader, now);
+  }
+
+  if (state->path == INTEL_PATH_I915_PMU) {
+    int64_t window_ms = elapsed_ms(state->baseline_at, now);
+    long double maximum = 0.0L;
+    bool counter_reset = false;
+    MetricErrorCode read_error = METRIC_ERROR_NONE;
+    uint64_t current_values[INTEL_MAX_PMU_EVENTS] = {0};
+    for (size_t i = 0; i < state->pmu_event_count; i++) {
+      if (read(state->pmu_fds[i], &current_values[i],
+               sizeof(current_values[i])) !=
+          (ssize_t)sizeof(current_values[i])) {
+        read_error = errno == EACCES || errno == EPERM
+                         ? METRIC_ERROR_PERMISSION_DENIED
+                     : errno == ENODEV || errno == ENXIO || errno == EIO
+                         ? METRIC_ERROR_DEVICE_MISSING
+                         : METRIC_ERROR_NO_TRUE_ENGINE_PATH;
+        continue;
+      }
+      if (current_values[i] < state->pmu_baseline[i]) {
+        counter_reset = true;
+      } else if (window_ms > 0) {
+        long double value =
+            (long double)(current_values[i] - state->pmu_baseline[i]) * 100.0L /
+            ((long double)window_ms * 1000000.0L);
+        if (value > maximum)
+          maximum = value;
+      }
+    }
+    if (counter_reset && read_error == METRIC_ERROR_NONE) {
+      for (size_t i = 0; i < state->pmu_event_count; i++)
+        state->pmu_baseline[i] = current_values[i];
+      state->baseline_at = now;
+    }
+    if (counter_reset || read_error != METRIC_ERROR_NONE || window_ms <= 0) {
+      record_failure(reader,
+                     counter_reset ? METRIC_ERROR_COUNTER_RESET
+                     : read_error == METRIC_ERROR_NONE
+                         ? METRIC_ERROR_NO_TRUE_ENGINE_PATH
+                         : read_error,
+                     "intel-i915-pmu", now);
+      return intel_unavailable_observation(reader, now);
+    }
+    for (size_t i = 0; i < state->pmu_event_count; i++)
+      state->pmu_baseline[i] = current_values[i];
+    state->baseline_at = now;
+    if (maximum > 100.0L)
+      maximum = 100.0L;
+    clear_failure(reader);
+    return available_observation(reader, (int)floorl(maximum + 0.5L), now,
+                                 window_ms, "intel-i915-pmu");
+  }
+
+  DrmSnapshot current = {0};
+  DrmScanResult scan =
+      scan_next_frame(reader, reader->options->fixture_intel_proc_frames_root,
+                      &state->next_fixture_frame, &current);
+  DrmDriver expected_driver =
+      state->path == INTEL_PATH_XE_FDINFO ? DRM_DRIVER_XE : DRM_DRIVER_I915;
+  const char *path = state->path == INTEL_PATH_XE_FDINFO ? "intel-xe-fdinfo"
+                                                         : "intel-i915-fdinfo";
+  if (scan != DRM_SCAN_OK || current.driver != expected_driver ||
+      !current.saw_engine_counter) {
+    MetricErrorCode code =
+        drm_scan_error(scan, METRIC_ERROR_NO_TRUE_ENGINE_PATH);
+    if (scan == DRM_SCAN_OK)
+      code = current.saw_target ? METRIC_ERROR_UNSUPPORTED_DEVICE
+                                : METRIC_ERROR_NO_TRUE_ENGINE_PATH;
+    record_failure(reader, code, path, now);
+    return intel_unavailable_observation(reader, now);
+  }
+
+  int64_t window_ms = elapsed_ms(state->baseline_at, now);
+  int percent = 0;
+  bool counter_reset = false;
+  bool available =
+      state->path == INTEL_PATH_XE_FDINFO
+          ? xe_percent(&state->baseline, &current, &percent, &counter_reset)
+          : engine_time_percent(&state->baseline, &current, window_ms, &percent,
+                                &counter_reset);
+  if (!available) {
+    record_failure(reader,
+                   counter_reset ? METRIC_ERROR_COUNTER_RESET
+                                 : METRIC_ERROR_NO_TRUE_ENGINE_PATH,
+                   path, now);
+    state->baseline = current;
+    state->baseline_at = now;
+    return intel_unavailable_observation(reader, now);
+  }
+
+  state->baseline = current;
+  state->baseline_at = now;
+
+  clear_failure(reader);
+  return available_observation(reader, percent, now, window_ms, path);
 }
 
 GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
                                        const GpuDevice *selected,
                                        struct timespec now) {
   gpu_measurement_reconcile(measurement, selected, now);
-  if (selected == NULL || selected->vendor != GPU_VENDOR_INTEL)
+  GpuReader *reader = &measurement->reader;
+  if (reader->adapter == NULL)
     return (GpuObservation){0};
-  if (measurement->path == INTEL_PATH_NONE) {
-    GpuObservation prior = unavailable_observation(measurement, now);
-    bool retryable =
-        measurement->failure_code == NULL ||
-        (strcmp(measurement->failure_code, "unsupportedDevice") != 0 &&
-         strcmp(measurement->failure_code, "noTrueEnginePath") != 0);
-    if (retryable)
-      prepare_intel_path(measurement, now);
-    if (measurement->path != INTEL_PATH_NONE)
-      return prior;
-    return unavailable_observation(measurement, now);
-  }
-
-  if (measurement->path == INTEL_PATH_I915_PMU) {
-    int64_t window_ms = elapsed_ms(measurement->baseline_at, now);
-    long double maximum = 0.0L;
-    bool counter_reset = false;
-    const char *read_error = NULL;
-    uint64_t current_values[INTEL_MAX_PMU_EVENTS] = {0};
-    for (size_t i = 0; i < measurement->pmu_event_count; i++) {
-      if (read(measurement->pmu_fds[i], &current_values[i],
-               sizeof(current_values[i])) !=
-          (ssize_t)sizeof(current_values[i])) {
-        read_error = errno == EACCES || errno == EPERM ? "permissionDenied"
-                     : errno == ENODEV || errno == ENXIO || errno == EIO
-                         ? "deviceMissing"
-                         : "noTrueEnginePath";
-        continue;
-      }
-      if (current_values[i] < measurement->pmu_baseline[i]) {
-        counter_reset = true;
-      } else if (window_ms > 0) {
-        long double value =
-            (long double)(current_values[i] - measurement->pmu_baseline[i]) *
-            100.0L / ((long double)window_ms * 1000000.0L);
-        if (value > maximum)
-          maximum = value;
-      }
-    }
-    if (counter_reset && read_error == NULL) {
-      for (size_t i = 0; i < measurement->pmu_event_count; i++)
-        measurement->pmu_baseline[i] = current_values[i];
-      measurement->baseline_at = now;
-    }
-    if (counter_reset || read_error != NULL || window_ms <= 0) {
-      record_failure(measurement,
-                     counter_reset ? "counterReset"
-                                   : (read_error == NULL ? "noTrueEnginePath"
-                                                         : read_error),
-                     "intel-i915-pmu", now);
-      return unavailable_observation(measurement, now);
-    }
-    for (size_t i = 0; i < measurement->pmu_event_count; i++)
-      measurement->pmu_baseline[i] = current_values[i];
-    measurement->baseline_at = now;
-    if (maximum > 100.0L)
-      maximum = 100.0L;
-    measurement->failure_code = NULL;
-    measurement->failure_path = NULL;
-    GpuObservation observation = {
-        .handled = true,
-        .available = true,
-        .percent = (int)floorl(maximum + 0.5L),
-        .sampled_at_ms = monotonic_ms(now),
-        .window_ms = window_ms,
-        .path = "intel-i915-pmu",
-        .evidence = "fixtureTested",
-    };
-    snprintf(observation.stable_id, sizeof(observation.stable_id), "%s",
-             measurement->selected_stable_id);
-    snprintf(observation.pci_bdf, sizeof(observation.pci_bdf), "%s",
-             measurement->selected_pci_bdf);
-    return observation;
-  }
-
-  IntelSnapshot current = {0};
-  IntelScanResult scan = scan_next_frame(measurement, &current);
-  IntelDriver expected_driver = measurement->path == INTEL_PATH_XE_FDINFO
-                                    ? INTEL_DRIVER_XE
-                                    : INTEL_DRIVER_I915;
-  const char *path = measurement->path == INTEL_PATH_XE_FDINFO
-                         ? "intel-xe-fdinfo"
-                         : "intel-i915-fdinfo";
-  if (scan != INTEL_SCAN_OK || current.driver != expected_driver ||
-      !current.saw_engine_counter) {
-    const char *code = scan == INTEL_SCAN_PERMISSION_DENIED ? "permissionDenied"
-                       : scan == INTEL_SCAN_INSUFFICIENT_VISIBILITY
-                           ? "insufficientVisibility"
-                       : scan == INTEL_SCAN_UNKNOWN_ABI || current.saw_target
-                           ? "unsupportedDevice"
-                           : "noTrueEnginePath";
-    record_failure(measurement, code, path, now);
-    return unavailable_observation(measurement, now);
-  }
-
-  int64_t window_ms = elapsed_ms(measurement->baseline_at, now);
-  int percent = 0;
-  bool counter_reset = false;
-  bool available = measurement->path == INTEL_PATH_XE_FDINFO
-                       ? xe_percent(&measurement->baseline, &current, &percent,
-                                    &counter_reset)
-                       : i915_percent(&measurement->baseline, &current,
-                                      window_ms, &percent, &counter_reset);
-  if (!available) {
-    record_failure(measurement,
-                   counter_reset ? "counterReset" : "noTrueEnginePath", path,
-                   now);
-    measurement->baseline = current;
-    measurement->baseline_at = now;
-    return unavailable_observation(measurement, now);
-  }
-
-  measurement->baseline = current;
-  measurement->baseline_at = now;
-
-  measurement->failure_code = NULL;
-  measurement->failure_path = NULL;
-  GpuObservation observation = {
-      .handled = true,
-      .available = true,
-      .percent = percent,
-      .sampled_at_ms = monotonic_ms(now),
-      .window_ms = window_ms,
-      .path = path,
-      .evidence = "fixtureTested",
-  };
-  snprintf(observation.stable_id, sizeof(observation.stable_id), "%s",
-           measurement->selected_stable_id);
-  snprintf(observation.pci_bdf, sizeof(observation.pci_bdf), "%s",
-           measurement->selected_pci_bdf);
-  return observation;
+  return reader->adapter->observe(reader, now);
 }
 
 static void emit_json_string(const char *value) {

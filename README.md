@@ -30,7 +30,9 @@ Intel GPU usage reports graphics-engine busy time for the selected PCI device. T
 - i915 DRM `fdinfo` `drm-engine-*` counters in nanoseconds;
 - Xe DRM `fdinfo` paired `drm-cycles-*` and `drm-total-cycles-*` counters.
 
-The helper excludes RC6 residency because it measures a power state rather than graphics-engine work. For DRM `fdinfo`, it scans visible process descriptors, filters on `drm-pdev`, deduplicates shared descriptors by device and `drm-client-id`, and applies `drm-engine-capacity-*`. It withholds the system-wide value if process visibility is incomplete. The helper opens kernel files and PMU descriptors itself; it does not invoke `intel_gpu_top` or launch a process for each sample.
+AMD GPU usage reads `gpu_busy_percent` from the selected device's exact `/sys/bus/pci/devices/<BDF>` directory. If that sensor is absent or unsupported, the helper can use AMD DRM `fdinfo` `drm-engine-*` counters. It ignores `mem_busy_percent`, VRAM, temperature, and values from other PCI devices.
+
+The helper excludes RC6 residency because it measures a power state rather than graphics-engine work. For DRM `fdinfo`, it scans visible process descriptors, filters on `drm-pdev`, deduplicates shared descriptors by device and `drm-client-id`, and applies `drm-engine-capacity-*`. It withholds the system-wide value if process visibility is incomplete. The helper opens kernel files and PMU descriptors itself; it does not invoke vendor CLI tools or launch a process for each sample.
 
 ## Failure handling
 
@@ -40,9 +42,9 @@ The session validates the helper protocol and supervises the process. A crash re
 
 The helper rebuilds the GPU inventory at session start, when you open the picker, and after it proves that the selected device disappeared. It does not scan for GPUs on the metric sampling cadence or after a settings change. A missing fixed GPU triggers an immediate search, then retries after 30 seconds, 5 minutes, and 30 minutes. After those attempts, the helper waits for you to reopen the picker or start a new session. Automatic selection and the fixed-device retry stage survive a supervised helper restart. CPU and RAM continue sampling while GPU selection or measurement is unavailable.
 
-The detail panel distinguishes missing permissions, incomplete process visibility, unknown counter ABIs, device loss, counter resets, and the absence of a documented engine path. These GPU states do not hide valid CPU or RAM values.
+The detail panel distinguishes missing permissions, runtime suspend, unreadable or malformed counters, unsupported counter ABIs, device loss, counter resets, and the absence of a documented engine path. These GPU states do not hide valid CPU or RAM values.
 
-The protocol labels CPU, RAM, and Intel GPU paths `fixtureTested`. The release process assigns `hardwareConfirmed` only after the separate real-hardware and resource-budget gate. See the [local i915 comparison](docs/hardware/intel-i915-comparison.md) for the current machine's result.
+The protocol labels CPU, RAM, Intel GPU, and AMD GPU paths `fixtureTested`. The release process assigns `hardwareConfirmed` only after the separate real-hardware and resource-budget gate. See the [local i915 comparison](docs/hardware/intel-i915-comparison.md) for the current machine's result.
 
 ## Development
 
@@ -53,7 +55,7 @@ make build
 make test
 ```
 
-Tests exercise CPU, RAM, GPU selection, and Intel GPU measurement through the public `SystemStatsSession` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Intel PMU, i915 `fdinfo`, and Xe `fdinfo` fixtures cover engine-event completeness, RC6 exclusion, PCI filtering, shared-client deduplication, engine capacity, reset handling, recovery, and visibility or ABI failures. Inventory fixtures cover integrated, discrete, and hybrid layouts; production-style udev naming; hotplug; fixed-device retries; helper restarts; and restoration across sessions. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke test verifies CPU, RAM, and GPU display; RAM formats; stable reserved width; picker persistence; and two callers sharing one single-threaded helper and scheduler.
+Tests exercise CPU, RAM, GPU selection, and vendor GPU measurement through the public `SystemStatsSession` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Intel PMU, i915 `fdinfo`, and Xe `fdinfo` fixtures cover engine-event completeness, RC6 exclusion, PCI filtering, shared-client deduplication, engine capacity, reset handling, recovery, and visibility or ABI failures. AMD fixtures cover APUs, discrete and multiple GPUs, exact-BDF sysfs reads, fdinfo fallback, suspend and read errors, invalid values, device loss, and exclusion of memory or temperature data. Inventory fixtures cover integrated, discrete, and hybrid layouts; production-style udev naming; hotplug; fixed-device retries; helper restarts; and restoration across sessions. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke tests verify CPU, RAM, and GPU display; RAM formats; stable reserved width; picker persistence; and two callers sharing one single-threaded helper and scheduler.
 
 ## License
 

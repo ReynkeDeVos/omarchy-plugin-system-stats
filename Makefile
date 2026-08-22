@@ -27,6 +27,7 @@ test: build check validate
 	bash tests/test_configuration.sh
 	bash tests/test_gpu_selection.sh
 	bash tests/test_intel_gpu.sh
+	bash tests/test_amd_gpu.sh
 	bash tests/test_gpu_persistence.sh
 	bash tests/test_freshness.sh
 	bash tests/test_protocol.sh

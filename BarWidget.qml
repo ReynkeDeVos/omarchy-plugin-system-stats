@@ -154,8 +154,17 @@ BarWidget {
     if (code === "unsupportedDevice" && snapshot.gpu.error
         && String(snapshot.gpu.error.pathId || "").indexOf("intel-") === 0)
       return "This Intel driver exposes an unknown measurement ABI."
+    if (code === "unsupportedDevice" && snapshot.gpu.error
+        && String(snapshot.gpu.error.pathId || "").indexOf("amd-") === 0)
+      return "This AMD device does not expose a supported measurement ABI."
+    if (code === "deviceSuspended")
+      return "The selected GPU is runtime-suspended."
     if (code === "deviceMissing")
       return "The selected GPU is no longer present."
+    if (code === "malformedCounter")
+      return "The GPU counter returned an invalid value."
+    if (code === "sourceUnreadable")
+      return "The GPU counter could not be read."
     if (code === "counterReset")
       return "GPU counters reset; the next complete sample will retry."
     if (code === "noTrueEnginePath")
@@ -178,6 +187,9 @@ BarWidget {
     if (path === "intel-i915-fdinfo") return "i915 DRM fdinfo"
     if (path === "intel-xe-fdinfo") return "Xe DRM cycle counters"
     if (path === "intel-fdinfo") return "Intel DRM fdinfo"
+    if (path === "amd-gpu-busy-percent") return "AMD gpu_busy_percent"
+    if (path === "amd-fdinfo") return "AMD DRM fdinfo"
+    if (path === "amd-measurement") return "AMD measurement"
     if (path === "gpu-selection") return "GPU selection"
     if (path === "gpu-inventory") return "GPU inventory"
     return path === "" ? "No measurement path" : path
