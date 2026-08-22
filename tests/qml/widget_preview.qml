@@ -28,7 +28,12 @@ ShellRoot {
     function onCurrentChanged() {
       if (session.current.sequence !== 1) return
       Qt.callLater(function() {
-        previewRoot.capture("system-stats-cpu.png", Qt.quit)
+        previewRoot.capture("system-stats-percent.png", function() {
+          widget.settings = ({ ramDisplayFormat: "gib" })
+          Qt.callLater(function() {
+            previewRoot.capture("system-stats-gib.png", Qt.quit)
+          })
+        })
       })
     }
   }

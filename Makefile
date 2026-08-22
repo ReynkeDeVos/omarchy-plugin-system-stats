@@ -23,6 +23,7 @@ validate:
 test: build check validate
 	bash tests/test_helper.sh
 	bash tests/test_session.sh
+	bash tests/test_ram.sh
 	bash tests/test_configuration.sh
 	bash tests/test_freshness.sh
 	bash tests/test_protocol.sh

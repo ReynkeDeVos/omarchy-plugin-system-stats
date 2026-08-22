@@ -40,8 +40,11 @@ ShellRoot {
     var expectedPhase = expectedStatus === "available" ? "live" : "degraded"
     if (!verify(snapshot.phase === expectedPhase, "snapshot phase")) return
     if (!verify(snapshot.cpu.status === expectedStatus, "CPU status")) return
-    if (!verify(snapshot.ram.status === "unavailable" && snapshot.ram.since > 0, "stable RAM unavailability")) return
-    if (!verify(snapshot.gpu.status === "unavailable" && snapshot.gpu.since === snapshot.ram.since, "stable GPU unavailability")) return
+    if (!verify(snapshot.ram.status === "available"
+                && snapshot.ram.value.percent === 63,
+                "independent RAM availability")) return
+    if (!verify(snapshot.gpu.status === "unavailable" && snapshot.gpu.since > 0,
+                "stable GPU unavailability")) return
     if (expectedStatus === "available") {
       if (!verify(snapshot.cpu.value.percent === expectedPercent, caseName + " CPU percentage")) return
       if (!verify(snapshot.cpu.value.actualWindowMs > 0, caseName + " complete CPU window")) return
@@ -55,6 +58,8 @@ ShellRoot {
     if (!verify(Object.isFrozen(snapshot), "snapshot immutability")) return
     if (!verify(Object.isFrozen(snapshot.cpu), "CPU metric immutability")) return
     if (snapshot.cpu.value && !verify(Object.isFrozen(snapshot.cpu.value), "CPU value immutability")) return
+    if (!verify(Object.isFrozen(snapshot.ram), "RAM metric immutability")) return
+    if (!verify(Object.isFrozen(snapshot.ram.value), "RAM value immutability")) return
 
     finished = true
     console.log("TEST-GENERATION: " + snapshot.generation)

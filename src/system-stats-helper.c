@@ -17,6 +17,8 @@
 
 enum { CPU_FIELD_COUNT = 8, MAX_COMMAND_BYTES = 65536 };
 
+static const uint64_t MAX_SAFE_INTEGER = UINT64_C(9007199254740991);
+
 typedef struct {
   uint64_t user;
   uint64_t nice;
@@ -30,6 +32,7 @@ typedef struct {
 
 typedef struct {
   const char *frames_path;
+  const char *meminfo_frames_path;
   long interval_ms;
   long second_ms;
 } Options;
@@ -44,7 +47,13 @@ typedef struct {
 typedef struct {
   const char *code;
   int64_t since_ms;
-} CpuFailureState;
+} MetricFailureState;
+
+typedef struct {
+  uint64_t used_bytes;
+  uint64_t total_bytes;
+  int percent;
+} MemoryUsage;
 
 typedef enum {
   PARSE_OK,
@@ -53,6 +62,25 @@ typedef enum {
   PARSE_SOURCE_UNREADABLE
 } ParseResult;
 
+typedef struct {
+  FILE *cpu_frames;
+  FILE *meminfo_frames;
+  CpuCounters previous_cpu;
+  ParseResult previous_cpu_result;
+  struct timespec baseline_at;
+} HostSampler;
+
+typedef struct {
+  bool cpu_available;
+  int cpu_percent;
+  const char *cpu_error;
+  bool ram_available;
+  MemoryUsage ram;
+  const char *ram_error;
+  struct timespec sampled_at;
+  int64_t window_ms;
+} HostObservation;
+
 static void fail(const char *message) {
   fprintf(stderr, "system-stats-helper: %s\n", message);
   exit(EXIT_FAILURE);
@@ -60,11 +88,16 @@ static void fail(const char *message) {
 
 static Options parse_options(int argc, char **argv) {
   const char *frames_path = getenv("SYSTEM_STATS_FRAMES");
+  const char *meminfo_frames_path = getenv("SYSTEM_STATS_MEMINFO_FRAMES");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
   const char *second_text = getenv("SYSTEM_STATS_SECOND_MS");
   Options options = {
       .frames_path =
           frames_path != NULL && *frames_path != '\0' ? frames_path : NULL,
+      .meminfo_frames_path =
+          meminfo_frames_path != NULL && *meminfo_frames_path != '\0'
+              ? meminfo_frames_path
+              : NULL,
       .interval_ms = 2000,
       .second_ms = 1000,
   };
@@ -94,6 +127,8 @@ static Options parse_options(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--frames") == 0 && i + 1 < argc) {
       options.frames_path = argv[++i];
+    } else if (strcmp(argv[i], "--meminfo-frames") == 0 && i + 1 < argc) {
+      options.meminfo_frames_path = argv[++i];
     } else if (strcmp(argv[i], "--interval-ms") == 0 && i + 1 < argc) {
       char *end = NULL;
       errno = 0;
@@ -103,7 +138,8 @@ static Options parse_options(int argc, char **argv) {
       }
       options.interval_ms = value;
     } else {
-      fail("usage: system-stats-helper [--frames PATH] [--interval-ms N]");
+      fail("usage: system-stats-helper [--frames PATH] [--meminfo-frames PATH] "
+           "[--interval-ms N]");
     }
   }
 
@@ -165,6 +201,115 @@ static ParseResult read_counters(FILE *frames, CpuCounters *counters) {
   if (frames == NULL)
     fclose(stream);
   return result;
+}
+
+static ParseResult parse_memory_field(char *field, uint64_t *total_kb,
+                                      bool *has_total, uint64_t *available_kb,
+                                      bool *has_available) {
+  char *cursor = field;
+  while (isspace((unsigned char)*cursor))
+    cursor++;
+
+  uint64_t *destination = NULL;
+  bool *seen = NULL;
+  if (strncmp(cursor, "MemTotal:", 9) == 0) {
+    cursor += 9;
+    destination = total_kb;
+    seen = has_total;
+  } else if (strncmp(cursor, "MemAvailable:", 13) == 0) {
+    cursor += 13;
+    destination = available_kb;
+    seen = has_available;
+  } else {
+    return PARSE_OK;
+  }
+
+  if (*seen)
+    return PARSE_MALFORMED;
+  while (isspace((unsigned char)*cursor))
+    cursor++;
+  if (!isdigit((unsigned char)*cursor))
+    return PARSE_MALFORMED;
+
+  errno = 0;
+  char *end = NULL;
+  uintmax_t value = strtoumax(cursor, &end, 10);
+  if (errno == ERANGE || end == cursor || value > UINT64_MAX)
+    return PARSE_MALFORMED;
+  cursor = end;
+  while (isspace((unsigned char)*cursor))
+    cursor++;
+  if (strncmp(cursor, "kB", 2) != 0)
+    return PARSE_MALFORMED;
+  cursor += 2;
+  while (isspace((unsigned char)*cursor))
+    cursor++;
+  if (*cursor != '\0' && *cursor != '\n')
+    return PARSE_MALFORMED;
+
+  *destination = (uint64_t)value;
+  *seen = true;
+  return PARSE_OK;
+}
+
+static ParseResult read_memory(FILE *frames, MemoryUsage *usage) {
+  FILE *stream = frames;
+  if (stream == NULL) {
+    stream = fopen("/proc/meminfo", "re");
+    if (stream == NULL)
+      return PARSE_SOURCE_UNREADABLE;
+  }
+
+  uint64_t total_kb = 0;
+  uint64_t available_kb = 0;
+  bool has_total = false;
+  bool has_available = false;
+  ParseResult result = PARSE_OK;
+  char *line = NULL;
+  size_t capacity = 0;
+
+  if (frames != NULL) {
+    ssize_t length = getline(&line, &capacity, stream);
+    if (length < 0) {
+      result = PARSE_SOURCE_UNREADABLE;
+    } else {
+      char *save = NULL;
+      for (char *field = strtok_r(line, ";", &save); field != NULL;
+           field = strtok_r(NULL, ";", &save)) {
+        result = parse_memory_field(field, &total_kb, &has_total, &available_kb,
+                                    &has_available);
+        if (result != PARSE_OK)
+          break;
+      }
+    }
+  } else {
+    while (getline(&line, &capacity, stream) >= 0) {
+      result = parse_memory_field(line, &total_kb, &has_total, &available_kb,
+                                  &has_available);
+      if (result != PARSE_OK)
+        break;
+    }
+    if (ferror(stream))
+      result = PARSE_SOURCE_UNREADABLE;
+  }
+
+  free(line);
+  if (frames == NULL)
+    fclose(stream);
+  if (result != PARSE_OK)
+    return result;
+  if (!has_total || !has_available)
+    return PARSE_MISSING_FIELD;
+  if (total_kb == 0 || available_kb > total_kb ||
+      total_kb > MAX_SAFE_INTEGER / 1024)
+    return PARSE_MALFORMED;
+
+  usage->total_bytes = total_kb * 1024;
+  usage->used_bytes = (total_kb - available_kb) * 1024;
+  long double value =
+      (long double)usage->used_bytes * 100.0L / (long double)usage->total_bytes;
+  usage->percent = (int)floorl(value + 0.5L);
+  return PARSE_OK;
 }
 
 static int64_t monotonic_ms(struct timespec instant) {
@@ -257,6 +402,73 @@ static bool cpu_percent(const CpuCounters *before, const CpuCounters *after,
   return true;
 }
 
+static struct timespec host_sampler_start(HostSampler *sampler,
+                                          const Options *options) {
+  *sampler = (HostSampler){
+      .cpu_frames = options->frames_path == NULL
+                        ? NULL
+                        : fopen(options->frames_path, "re"),
+      .meminfo_frames = options->meminfo_frames_path == NULL
+                            ? NULL
+                            : fopen(options->meminfo_frames_path, "re"),
+  };
+  if (options->frames_path != NULL && sampler->cpu_frames == NULL)
+    fail("could not open fixture frames");
+  if (options->meminfo_frames_path != NULL && sampler->meminfo_frames == NULL)
+    fail("could not open memory fixture frames");
+
+  sampler->previous_cpu_result =
+      read_counters(sampler->cpu_frames, &sampler->previous_cpu);
+  sampler->baseline_at = monotonic_now();
+  return sampler->baseline_at;
+}
+
+static struct timespec host_sampler_reset(HostSampler *sampler) {
+  sampler->previous_cpu_result =
+      read_counters(sampler->cpu_frames, &sampler->previous_cpu);
+  sampler->baseline_at = monotonic_now();
+  return sampler->baseline_at;
+}
+
+static HostObservation host_sampler_observe(HostSampler *sampler,
+                                            struct timespec deadline) {
+  if (compare_timespec(deadline, sampler->baseline_at) <= 0)
+    fail("host sampler deadline must follow its CPU baseline");
+
+  CpuCounters current_cpu = {0};
+  ParseResult current_cpu_result =
+      read_counters(sampler->cpu_frames, &current_cpu);
+  HostObservation observation = {0};
+  ParseResult ram_result =
+      read_memory(sampler->meminfo_frames, &observation.ram);
+  observation.sampled_at = monotonic_now();
+  observation.window_ms =
+      monotonic_ms(observation.sampled_at) - monotonic_ms(sampler->baseline_at);
+
+  if (sampler->previous_cpu_result != PARSE_OK) {
+    observation.cpu_error = parse_error(sampler->previous_cpu_result);
+  } else if (current_cpu_result != PARSE_OK) {
+    observation.cpu_error = parse_error(current_cpu_result);
+  } else {
+    observation.cpu_available =
+        cpu_percent(&sampler->previous_cpu, &current_cpu,
+                    &observation.cpu_percent, &observation.cpu_error);
+  }
+
+  observation.ram_available = ram_result == PARSE_OK;
+  if (!observation.ram_available)
+    observation.ram_error = parse_error(ram_result);
+
+  sampler->previous_cpu = current_cpu;
+  sampler->previous_cpu_result = current_cpu_result;
+  sampler->baseline_at = observation.sampled_at;
+  return observation;
+}
+
+static bool host_sampler_fixture_exhausted(const HostSampler *sampler) {
+  return sampler->cpu_frames != NULL && feof(sampler->cpu_frames);
+}
+
 static void emit_hello(uint64_t generation, int64_t published_at_ms) {
   printf("{\"type\":\"hello\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"publishedAtMs\":%" PRId64 "}\n",
@@ -296,19 +508,14 @@ static bool parse_configure(char *line, ConfigureCommand *command) {
   return line[consumed] == '\0';
 }
 
-static void emit_unavailable_dependencies(int64_t unavailable_since_ms) {
-  printf(",\"ram\":{\"status\":\"unavailable\","
-         "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"ram\","
-         "\"retryability\":\"nonRetryable\","
-         "\"diagnostic\":\"metric provider is outside the CPU-only "
-         "slice\"},\"since\":%" PRId64 "},"
-         "\"gpu\":{\"status\":\"unavailable\","
+static void emit_unavailable_gpu(int64_t unavailable_since_ms) {
+  printf(",\"gpu\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
          "\"retryability\":\"nonRetryable\","
-         "\"diagnostic\":\"metric provider is outside the CPU-only "
+         "\"diagnostic\":\"metric provider is outside the CPU and RAM "
          "slice\"},\"since\":%" PRId64 "},"
          "\"source\":{\"status\":\"running\"}}\n",
-         unavailable_since_ms, unavailable_since_ms);
+         unavailable_since_ms);
 }
 
 static void emit_initializing_snapshot(uint64_t generation, uint64_t sequence,
@@ -318,79 +525,87 @@ static void emit_initializing_snapshot(uint64_t generation, uint64_t sequence,
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
          ",\"phase\":\"initializing\",\"publishedAtMs\":%" PRId64
-         ",\"cpu\":{\"status\":\"initializing\",\"since\":%" PRId64 "}",
+         ",\"cpu\":{\"status\":\"initializing\",\"since\":%" PRId64 "},"
+         "\"ram\":{\"status\":\"initializing\",\"since\":%" PRId64 "}",
          generation, sequence, config_revision, initialized_at_ms,
-         initialized_at_ms);
-  emit_unavailable_dependencies(unavailable_since_ms);
+         initialized_at_ms, initialized_at_ms);
+  emit_unavailable_gpu(unavailable_since_ms);
   fflush(stdout);
 }
 
 static void emit_snapshot(uint64_t generation, uint64_t sequence,
-                          uint64_t config_revision, struct timespec sampled_at,
-                          int64_t window_ms, int64_t unavailable_since_ms,
-                          CpuFailureState *cpu_failure,
-                          const CpuCounters *before, const CpuCounters *after,
-                          ParseResult current_result,
-                          ParseResult previous_result) {
-  int percent = 0;
-  const char *error = NULL;
-  bool available = false;
-
-  if (previous_result != PARSE_OK) {
-    error = parse_error(previous_result);
-  } else if (current_result != PARSE_OK) {
-    error = parse_error(current_result);
-  } else {
-    available = cpu_percent(before, after, &percent, &error);
-  }
-
-  int64_t sampled_at_ms = monotonic_ms(sampled_at);
-  if (available) {
+                          uint64_t config_revision,
+                          int64_t unavailable_since_ms,
+                          const HostObservation *observation,
+                          MetricFailureState *cpu_failure,
+                          MetricFailureState *ram_failure) {
+  int64_t sampled_at_ms = monotonic_ms(observation->sampled_at);
+  if (observation->cpu_available) {
     cpu_failure->code = NULL;
   } else if (cpu_failure->code == NULL ||
-             strcmp(cpu_failure->code, error) != 0) {
-    cpu_failure->code = error;
+             strcmp(cpu_failure->code, observation->cpu_error) != 0) {
+    cpu_failure->code = observation->cpu_error;
     cpu_failure->since_ms = sampled_at_ms;
+  }
+
+  if (observation->ram_available) {
+    ram_failure->code = NULL;
+  } else if (ram_failure->code == NULL ||
+             strcmp(ram_failure->code, observation->ram_error) != 0) {
+    ram_failure->code = observation->ram_error;
+    ram_failure->since_ms = sampled_at_ms;
   }
 
   printf("{\"type\":\"snapshot\",\"schemaVersion\":1,\"generation\":%" PRIu64
          ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
          ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64 ",\"cpu\":",
-         generation, sequence, config_revision, available ? "live" : "degraded",
+         generation, sequence, config_revision,
+         observation->cpu_available && observation->ram_available ? "live"
+                                                                  : "degraded",
          sampled_at_ms);
-  if (available) {
+  if (observation->cpu_available) {
     printf("{\"status\":\"available\",\"value\":{\"percent\":%d,"
            "\"actualWindowMs\":%" PRId64 "},"
            "\"sampledAtMs\":%" PRId64 ",\"window\":{\"actualMs\":%" PRId64 "},"
            "\"evidence\":\"fixtureTested\",\"path\":\"proc-stat\"}",
-           percent, window_ms, sampled_at_ms, window_ms);
+           observation->cpu_percent, observation->window_ms, sampled_at_ms,
+           observation->window_ms);
   } else {
     printf("{\"status\":\"unavailable\","
            "\"error\":{\"code\":\"%s\",\"scope\":\"cpu\","
            "\"retryability\":\"retryable\",\"pathId\":\"proc-stat\"},"
            "\"since\":%" PRId64 "}",
-           error, cpu_failure->since_ms);
+           observation->cpu_error, cpu_failure->since_ms);
   }
-  emit_unavailable_dependencies(unavailable_since_ms);
+  if (observation->ram_available) {
+    printf(",\"ram\":{\"status\":\"available\",\"value\":{\"percent\":%d,"
+           "\"usedBytes\":%" PRIu64 ",\"totalBytes\":%" PRIu64 "},"
+           "\"sampledAtMs\":%" PRId64 ",\"window\":{\"actualMs\":%" PRId64
+           "},\"evidence\":\"fixtureTested\",\"path\":\"proc-meminfo\"}",
+           observation->ram.percent, observation->ram.used_bytes,
+           observation->ram.total_bytes, sampled_at_ms, observation->window_ms);
+  } else {
+    printf(",\"ram\":{\"status\":\"unavailable\","
+           "\"error\":{\"code\":\"%s\",\"scope\":\"ram\","
+           "\"retryability\":\"retryable\",\"pathId\":\"proc-meminfo\"},"
+           "\"since\":%" PRId64 "}",
+           observation->ram_error, ram_failure->since_ms);
+  }
+  emit_unavailable_gpu(unavailable_since_ms);
   fflush(stdout);
 }
 
 int main(int argc, char **argv) {
   Options options = parse_options(argc, argv);
-  FILE *frames =
-      options.frames_path == NULL ? NULL : fopen(options.frames_path, "re");
-  if (options.frames_path != NULL && frames == NULL)
-    fail("could not open fixture frames");
-
-  CpuCounters previous = {0};
-  ParseResult previous_result = read_counters(frames, &previous);
-  struct timespec previous_at = monotonic_now();
-  struct timespec deadline = add_ms(previous_at, options.interval_ms);
-  int64_t started_at_ms = monotonic_ms(previous_at);
+  HostSampler host_sampler = {0};
+  struct timespec initialized_at = host_sampler_start(&host_sampler, &options);
+  struct timespec deadline = add_ms(initialized_at, options.interval_ms);
+  int64_t started_at_ms = monotonic_ms(initialized_at);
   uint64_t generation = new_generation();
   uint64_t sequence = 0;
   uint64_t config_revision = 0;
-  CpuFailureState cpu_failure = {0};
+  MetricFailureState cpu_failure = {0};
+  MetricFailureState ram_failure = {0};
   bool accepts_commands = true;
 
   emit_hello(generation, monotonic_ms(monotonic_now()));
@@ -442,13 +657,13 @@ int main(int argc, char **argv) {
 
       options.interval_ms = command.interval_seconds * options.second_ms;
       config_revision = command.config_revision;
-      previous_result = read_counters(frames, &previous);
-      previous_at = monotonic_now();
-      deadline = add_ms(previous_at, options.interval_ms);
+      struct timespec reset_at = host_sampler_reset(&host_sampler);
+      deadline = add_ms(reset_at, options.interval_ms);
       cpu_failure.code = NULL;
+      ram_failure.code = NULL;
       emit_ack(generation, &command);
       emit_initializing_snapshot(generation, ++sequence, config_revision,
-                                 monotonic_ms(previous_at), started_at_ms);
+                                 monotonic_ms(reset_at), started_at_ms);
       free(line);
       continue;
     }
@@ -458,25 +673,18 @@ int main(int argc, char **argv) {
       continue;
     }
 
-    CpuCounters current = {0};
-    ParseResult current_result = read_counters(frames, &current);
-    struct timespec sampled_at = monotonic_now();
+    HostObservation observation = host_sampler_observe(&host_sampler, deadline);
 
-    if (frames != NULL && feof(frames)) {
+    if (host_sampler_fixture_exhausted(&host_sampler)) {
       for (;;)
         pause();
     }
 
-    emit_snapshot(generation, ++sequence, config_revision, sampled_at,
-                  monotonic_ms(sampled_at) - monotonic_ms(previous_at),
-                  started_at_ms, &cpu_failure, &previous, &current,
-                  current_result, previous_result);
+    emit_snapshot(generation, ++sequence, config_revision, started_at_ms,
+                  &observation, &cpu_failure, &ram_failure);
 
-    previous = current;
-    previous_result = current_result;
-    previous_at = sampled_at;
     deadline = add_ms(deadline, options.interval_ms);
-    if (compare_timespec(deadline, sampled_at) <= 0)
-      deadline = add_ms(sampled_at, options.interval_ms);
+    if (compare_timespec(deadline, observation.sampled_at) <= 0)
+      deadline = add_ms(observation.sampled_at, options.interval_ms);
   }
 }

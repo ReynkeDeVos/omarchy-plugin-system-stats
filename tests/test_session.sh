@@ -15,6 +15,7 @@ cp "$repo_root/Service.qml" "$test_dir/Service.qml"
 cp "$repo_root/tests/qml/session_harness.qml" "$test_dir/shell.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/bin/system-stats-helper"
 cp -R "$repo_root/tests/fixtures/cpu" "$test_dir/fixtures/cpu"
+cp -R "$repo_root/tests/fixtures/ram" "$test_dir/fixtures/ram"
 
 observed_generations=()
 
@@ -34,6 +35,7 @@ run_case() {
     SYSTEM_STATS_EXPECTED_ERROR="$expected_error" \
     SYSTEM_STATS_EXPECTED_SEQUENCE="$expected_sequence" \
     SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/$case_name.stat" \
+    SYSTEM_STATS_MEMINFO_FRAMES="$test_dir/fixtures/ram/normal.meminfo" \
     SYSTEM_STATS_INTERVAL_MS=1 \
     QT_QPA_PLATFORM=offscreen \
     timeout 5s quickshell --no-color --path "$test_dir/shell.qml" 2>&1)
