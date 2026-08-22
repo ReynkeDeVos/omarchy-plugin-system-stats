@@ -37,6 +37,7 @@ BarWidget {
     ? Math.max(0, ramGiBCapacityMetrics.advanceWidth - ramPercentMetrics.advanceWidth)
     : 0
   readonly property bool opened: popupOpen
+  readonly property var _detailPanel: detailPanel
   readonly property var gpuInventory: session ? session.gpuInventory : ({ revision: 0, devices: [] })
   readonly property var gpuOptions: buildGpuOptions()
   readonly property string selectedGpuStableId: snapshot && snapshot.selection
@@ -110,20 +111,15 @@ BarWidget {
       && selection.configRevision >= 0 ? selection.configRevision : 0
     _nextSettingsRevision = Math.max(_nextSettingsRevision, revision + 1,
                                      Number(session.current.configRevision) + 1)
-    var runtimeKey = revision + "|" + configuredIntervalSeconds() + "|"
-      + selection.mode + "|" + String(selection.stableId || "")
+    var interval = configuredIntervalSeconds()
+    var runtimeKey = runtimeSettingsKey(revision, interval, selection)
     if (runtimeKey === _lastOfferedRuntimeSettings) return
     _lastOfferedRuntimeSettings = runtimeKey
     if (revision === 0 && selection.mode === "auto"
-        && configuredIntervalSeconds() === 2
+        && interval === 2
         && Number(session.current.configRevision) === 0) return
-    _pendingSettingsCommandId = session.configure({
-      configRevision: revision,
-      intervalSeconds: configuredIntervalSeconds(),
-      gpuSelection: selection.mode === "fixed"
-        ? { mode: "fixed", stableId: selection.stableId }
-        : { mode: "auto" }
-    })
+    _pendingSettingsCommandId = session.configure(
+      runtimeConfiguration(revision, interval, selection))
   }
 
   function configuredIntervalSeconds() {
@@ -152,6 +148,34 @@ BarWidget {
     return true
   }
 
+  function selectionAtRevision(selection, revision) {
+    return selection.mode === "fixed"
+      ? { mode: "fixed", stableId: selection.stableId, configRevision: revision }
+      : { mode: "auto", configRevision: revision }
+  }
+
+  function runtimeConfiguration(revision, interval, selection) {
+    return {
+      configRevision: revision,
+      intervalSeconds: interval,
+      gpuSelection: selection.mode === "fixed"
+        ? { mode: "fixed", stableId: selection.stableId }
+        : { mode: "auto" }
+    }
+  }
+
+  function runtimeSettingsKey(revision, interval, selection) {
+    return JSON.stringify(runtimeConfiguration(revision, interval, selection))
+  }
+
+  function offerRuntimeConfiguration(revision, interval, selection) {
+    _lastOfferedRuntimeSettings = runtimeSettingsKey(revision, interval, selection)
+    if (session) {
+      _pendingSettingsCommandId = session.configure(
+        runtimeConfiguration(revision, interval, selection))
+    }
+  }
+
   function setRamDisplayFormat(value) {
     value = String(value)
     if (value !== "percent" && value !== "gib") {
@@ -175,26 +199,14 @@ BarWidget {
     var revision = Math.max(_nextSettingsRevision,
                             Number(session ? session.current.configRevision : 0) + 1)
     _nextSettingsRevision = revision + 1
-    var persistedSelection = selection.mode === "fixed"
-      ? { mode: "fixed", stableId: selection.stableId, configRevision: revision }
-      : { mode: "auto", configRevision: revision }
+    var persistedSelection = selectionAtRevision(selection, revision)
     if (!persistSetting("gpuSelection", persistedSelection,
                         "Runtime settings could not be saved")) return
     if (!persistSetting("intervalSeconds", value,
                         "Sampling interval could not be saved")) return
     _pendingGpuSelection = persistedSelection
     _intervalSecondsOverride = value
-    _lastOfferedRuntimeSettings = revision + "|" + value + "|"
-      + selection.mode + "|" + String(selection.stableId || "")
-    if (session) {
-      _pendingSettingsCommandId = session.configure({
-        configRevision: revision,
-        intervalSeconds: value,
-        gpuSelection: selection.mode === "fixed"
-          ? { mode: "fixed", stableId: selection.stableId }
-          : { mode: "auto" }
-      })
-    }
+    offerRuntimeConfiguration(revision, value, selection)
   }
 
   function buildGpuOptions() {
@@ -247,35 +259,7 @@ BarWidget {
     if (!snapshot || !snapshot.gpu) return "Waiting for the first GPU sample…"
     if (snapshot.gpu.status === "available")
       return snapshot.gpu.value.percent + "% graphics engine busy"
-    var code = snapshot.gpu.error ? snapshot.gpu.error.code : ""
-    if (code === "permissionDenied")
-      return "GPU counters are not readable with the current permissions."
-    if (code === "insufficientVisibility")
-      return "Some processes are hidden, so a reliable system-wide value is unavailable."
-    if (code === "unsupportedDevice" && snapshot.gpu.error
-        && String(snapshot.gpu.error.pathId || "").indexOf("intel-") === 0)
-      return "This Intel driver exposes an unknown measurement ABI."
-    if (code === "unsupportedDevice" && snapshot.gpu.error
-        && String(snapshot.gpu.error.pathId || "").indexOf("amd-") === 0)
-      return "This AMD device does not expose a supported measurement ABI."
-    if (code === "deviceSuspended")
-      return "The selected GPU is runtime-suspended."
-    if (code === "deviceMissing")
-      return "The selected GPU is no longer present."
-    if (code === "malformedCounter")
-      return "The GPU counter returned an invalid value."
-    if (code === "sourceUnreadable")
-      return "The GPU counter could not be read."
-    if (code === "counterReset")
-      return "GPU counters reset; the next complete sample will retry."
-    if (code === "noTrueEnginePath")
-      return "No true graphics-engine measurement path is available."
-    if (code === "stale")
-      return "The last GPU sample is no longer current."
-    if (code === "selectionRequired")
-      return "Choose a GPU before usage can be measured."
-    return snapshot.gpu.error && snapshot.gpu.error.diagnostic
-      ? snapshot.gpu.error.diagnostic : "GPU usage is unavailable."
+    return errorSummary(snapshot.gpu.error || ({}), "gpu", false)
   }
 
   function metricFor(scope) {
@@ -301,9 +285,35 @@ BarWidget {
     var metric = metricFor(scope)
     if (!metric || metric.status === "initializing") return "Waiting for the first sample"
     if (metric.status === "available") return "None"
-    var error = metric.error || ({})
-    if (error.diagnostic) return String(error.diagnostic)
+    return errorSummary(metric.error || ({}), scope, true)
+  }
+
+  function errorSummary(error, scope, preferDiagnostic) {
+    if (preferDiagnostic && error.diagnostic) return String(error.diagnostic)
     var code = String(error.code || "")
+    var pathId = String(error.pathId || "")
+    if (scope === "gpu" && code === "permissionDenied")
+      return "GPU counters are not readable with the current permissions."
+    if (scope === "gpu" && code === "insufficientVisibility")
+      return "Some processes are hidden, so a reliable system-wide value is unavailable."
+    if (scope === "gpu" && code === "unsupportedDevice"
+        && pathId.indexOf("intel-") === 0)
+      return "This Intel driver exposes an unknown measurement ABI."
+    if (scope === "gpu" && code === "unsupportedDevice"
+        && pathId.indexOf("amd-") === 0)
+      return "This AMD device does not expose a supported measurement ABI."
+    if (scope === "gpu" && code === "deviceSuspended")
+      return "The selected GPU is runtime-suspended."
+    if (scope === "gpu" && code === "deviceMissing")
+      return "The selected GPU is no longer present."
+    if (scope === "gpu" && code === "malformedCounter")
+      return "The GPU counter returned an invalid value."
+    if (scope === "gpu" && code === "sourceUnreadable")
+      return "The GPU counter could not be read."
+    if (scope === "gpu" && code === "counterReset")
+      return "GPU counters reset; the next complete sample will retry."
+    if (scope === "gpu" && code === "stale")
+      return "The last GPU sample is no longer current."
     if (code === "permissionDenied") return "The metric source is not readable with the current permissions."
     if (code === "missingRequiredField") return "A required field is missing from the metric source."
     if (code === "malformedCounter") return "The metric source returned an invalid counter."
@@ -322,7 +332,9 @@ BarWidget {
     if (code === "collectorUnresponsive") return "The metric collector stopped responding."
     if (code === "protocolError") return "The collector returned an invalid message."
     if (code === "sourceUnreadable") return "The metric source could not be read."
-    return "The metric is unavailable."
+    if (error.diagnostic) return String(error.diagnostic)
+    return scope === "source" ? "The metric source is unavailable."
+      : (scope === "gpu" ? "GPU usage is unavailable." : "The metric is unavailable.")
   }
 
   function metricValueSummary(scope) {
@@ -395,19 +407,12 @@ BarWidget {
   function sourceErrorSummary() {
     var source = snapshot && snapshot.source ? snapshot.source : null
     if (!source || !source.error) return "None"
-    var code = String(source.error.code || "")
-    if (code === "collectorExited") return "The collector exited unexpectedly."
-    if (code === "collectorUnresponsive") return "The collector stopped responding."
-    if (code === "protocolError") return "The collector returned an invalid message."
-    return "The metric source is unavailable."
+    return errorSummary(source.error, "source", false)
   }
 
   function gpuMeasurementPath() {
     if (!snapshot || !snapshot.gpu) return "Not selected"
-    var rawPath = snapshot.gpu.status === "available"
-      ? snapshot.gpu.path
-      : (snapshot.gpu.error ? snapshot.gpu.error.pathId : "")
-    return measurementPathName(rawPath)
+    return metricMeasurementPath("gpu")
   }
 
   function gpuEvidenceSummary() {
@@ -434,19 +439,11 @@ BarWidget {
     var revision = Math.max(_nextSettingsRevision,
                             Number(session.current.configRevision) + 1)
     _nextSettingsRevision = revision + 1
-    var persisted = selection.mode === "fixed"
-      ? { mode: "fixed", stableId: selection.stableId, configRevision: revision }
-      : { mode: "auto", configRevision: revision }
+    var persisted = selectionAtRevision(selection, revision)
     if (!persistSetting("gpuSelection", persisted,
                         "GPU selection could not be saved")) return
     _pendingGpuSelection = persisted
-    _lastOfferedRuntimeSettings = revision + "|" + configuredIntervalSeconds()
-      + "|" + selection.mode + "|" + String(selection.stableId || "")
-    _pendingSettingsCommandId = session.configure({
-      configRevision: revision,
-      intervalSeconds: configuredIntervalSeconds(),
-      gpuSelection: selection
-    })
+    offerRuntimeConfiguration(revision, configuredIntervalSeconds(), selection)
   }
 
   function formatGiB(bytes) {
@@ -464,7 +461,6 @@ BarWidget {
         : "RAM " + ramDisplayValue + " percent")
     }
     if (gpuVisible) metrics.push("GPU " + gpuDisplayValue + " percent")
-    else if (gpuUnavailable) metrics.push("GPU metric unavailable")
     return metrics.length > 0
       ? "System Stats, " + metrics.join(", ")
       : "System Stats. No system metrics are available"
@@ -1195,7 +1191,6 @@ BarWidget {
     }
 
     Text {
-      visible: metricDetail.unavailable
       width: parent.width
       text: "Reason · " + root.metricErrorSummary(metricDetail.metricKey)
       color: root.bar ? root.bar.foreground : Color.foreground

@@ -30,8 +30,8 @@ ShellRoot {
     if (!verify(!widget.gpuMetricVisible,
                 "an unavailable GPU metric is fully hidden from the bar")) return
     if (!verify(!widget.warningVisible, "healthy host metrics avoid a global warning")) return
-    if (!verify(widget.Accessible.name.indexOf("GPU metric unavailable") !== -1,
-                "the hidden GPU failure has an accessible description")) return
+    if (!verify(widget.Accessible.name.indexOf("GPU") === -1,
+                "the unavailable GPU is also omitted from the accessible bar name")) return
     if (!verify(widget.gpuStatusSummary()
                 === "GPU counters are not readable with the current permissions.",
                 "detail panel explains the permission failure")) return

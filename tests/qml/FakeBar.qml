@@ -32,6 +32,7 @@ QtObject {
   }
 
   property bool vertical: false
+  property string position: "top"
   property int barSize: 26
   property string fontFamily: "JetBrainsMono Nerd Font"
   property color barForeground: "#dbe2ef"

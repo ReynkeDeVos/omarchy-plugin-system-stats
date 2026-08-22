@@ -154,6 +154,8 @@ ShellRoot {
                   "CPU status is available in the detail model")) return
       if (!verify(widget.metricMeasurementPath("cpu") === "/proc/stat",
                   "CPU detail names its measurement path")) return
+      if (!verify(widget.metricErrorSummary("cpu") === "None",
+                  "available metrics expose an explicit empty error field")) return
       checkRamFormat()
     })
   }
@@ -204,8 +206,15 @@ ShellRoot {
     if (!verify(!widget.opened && fakeSession.current === snapshot,
                 "the btop action changes neither panel nor metrics")) return
     widget.handleButton(Qt.LeftButton)
+    var panel = widget._detailPanel
     if (!verify(widget.opened && fakeSession.refreshCount === 1,
                 "left click opens the panel and refreshes the picker once")) return
+    if (!verify(panel && panel.open && panel.contentWidth > widget.implicitWidth
+                && panel.contentHeight > fakeBar.barSize * 4
+                && (panel.availableCardHeight <= 0
+                    || panel.contentHeight <= panel.availableCardHeight
+                      + panel.verticalContentInset),
+                "the open detail panel retains usable prototype geometry")) return
     widget.handleButton(Qt.LeftButton)
     if (!verify(!widget.opened, "a second left click closes the panel")) return
     checkFailureContract()
