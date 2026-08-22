@@ -7,6 +7,7 @@ Item {
   id: root
 
   readonly property var current: _current
+  readonly property var gpuInventory: _gpuInventory
 
   signal commandSettled(int commandId, bool accepted, string errorCode)
 
@@ -29,14 +30,31 @@ Item {
       },
       since: 0
     },
+    selection: { mode: "auto", status: "none" },
     source: { status: "starting" }
   })
+  property var _gpuInventory: _immutable({
+    revision: 0,
+    discoveredAtMs: 0,
+    devices: []
+  })
   property double _generation: 0
+  property double _gpuInventoryGeneration: 0
   property int _sequence: 0
   property int _configRevision: 0
   property int _intervalSeconds: 2
+  property string _gpuSelectionMode: "auto"
+  property string _gpuStableId: ""
+  property bool _hasGpuSessionState: false
+  property string _sessionAutoStatus: "none"
+  property string _sessionAutoStableId: ""
+  property int _fixedGpuRetryStage: 0
+  property double _fixedGpuRetryAt: -1
+  property bool _awaitingGpuResume: false
+  property var _provisionalGpuInventory: null
   property int _nextCommandId: 1
   property var _pendingConfigurations: ({})
+  property var _pendingGpuInventoryRefreshes: ({})
   readonly property int _secondMs: {
     var configured = Number(Quickshell.env("SYSTEM_STATS_SECOND_MS"))
     return Number.isInteger(configured) && configured > 0 ? configured : 1000
@@ -64,12 +82,16 @@ Item {
 
   function configure(settings) {
     var commandId = _nextCommandId++
+    var gpuSelection = settings && settings.gpuSelection !== undefined
+      ? settings.gpuSelection
+      : { mode: _gpuSelectionMode, stableId: _gpuStableId }
     if (!settings
         || !Number.isSafeInteger(settings.configRevision)
         || settings.configRevision < 0
         || !Number.isInteger(settings.intervalSeconds)
         || settings.intervalSeconds < 2
-        || settings.intervalSeconds > 10) {
+        || settings.intervalSeconds > 10
+        || !_validGpuSelectionPolicy(gpuSelection)) {
       commandSettled(commandId, false, "invalidConfiguration")
       return commandId
     }
@@ -80,23 +102,68 @@ Item {
       generation: _generation,
       commandId: commandId,
       configRevision: settings.configRevision,
-      intervalSeconds: settings.intervalSeconds
+      intervalSeconds: settings.intervalSeconds,
+      gpuSelection: gpuSelection.mode === "fixed"
+        ? { mode: "fixed", stableId: String(gpuSelection.stableId) }
+        : { mode: "auto" }
     }
     _pendingConfigurations[commandId] = command
     if (collector.running && _generation > 0) _sendConfiguration(command)
     return commandId
   }
 
+  function refreshGpuInventory() {
+    var commandId = _nextCommandId++
+    var command = {
+      type: "refreshGpuInventory",
+      schemaVersion: 1,
+      generation: _generation,
+      commandId: commandId
+    }
+    _pendingGpuInventoryRefreshes[commandId] = command
+    if (collector.running && _generation > 0) _sendGpuInventoryRefresh(command)
+    return commandId
+  }
+
+  function _validStableGpuId(stableId) {
+    if (typeof stableId !== "string") return false
+    return /^pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(stableId)
+      || /^nvidia:GPU-[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$/.test(stableId)
+  }
+
+  function _validGpuSelectionPolicy(selection) {
+    if (!selection || typeof selection !== "object") return false
+    if (selection.mode === "auto") return true
+    return selection.mode === "fixed" && _validStableGpuId(selection.stableId)
+  }
+
   function _sendConfiguration(command) {
+    command.generation = _generation
+    command.sentGeneration = _generation
+    var payload = {
+      type: command.type,
+      schemaVersion: command.schemaVersion,
+      generation: command.generation,
+      commandId: command.commandId,
+      configRevision: command.configRevision,
+      intervalSeconds: command.intervalSeconds,
+      gpuSelection: command.gpuSelection
+    }
+    if (command.silent) {
+      var resume = _gpuResumeForActiveConfiguration()
+      if (resume !== null) payload.gpuResume = resume
+    }
+    collector.write(JSON.stringify(payload) + "\n")
+  }
+
+  function _sendGpuInventoryRefresh(command) {
     command.generation = _generation
     command.sentGeneration = _generation
     collector.write(JSON.stringify({
       type: command.type,
       schemaVersion: command.schemaVersion,
       generation: command.generation,
-      commandId: command.commandId,
-      configRevision: command.configRevision,
-      intervalSeconds: command.intervalSeconds
+      commandId: command.commandId
     }) + "\n")
   }
 
@@ -108,14 +175,26 @@ Item {
     }
   }
 
+  function _sendPendingGpuInventoryRefreshes() {
+    var commandIds = Object.keys(_pendingGpuInventoryRefreshes)
+    for (var i = 0; i < commandIds.length; i++) {
+      var command = _pendingGpuInventoryRefreshes[commandIds[i]]
+      if (command.sentGeneration !== _generation) _sendGpuInventoryRefresh(command)
+    }
+  }
+
   function _sendActiveConfiguration() {
-    if (_configRevision === 0 && _intervalSeconds === 2) return
+    var resume = _gpuResumeForActiveConfiguration()
+    if (_configRevision === 0 && _intervalSeconds === 2
+        && _gpuSelectionMode === "auto" && resume === null) return
     var pendingIds = Object.keys(_pendingConfigurations)
     for (var i = 0; i < pendingIds.length; i++) {
       var pending = _pendingConfigurations[pendingIds[i]]
       if (pending.silent
           && pending.configRevision === _configRevision
-          && pending.intervalSeconds === _intervalSeconds) {
+          && pending.intervalSeconds === _intervalSeconds
+          && pending.gpuSelection.mode === _gpuSelectionMode
+          && String(pending.gpuSelection.stableId || "") === _gpuStableId) {
         _sendConfiguration(pending)
         return
       }
@@ -128,10 +207,52 @@ Item {
       commandId: commandId,
       configRevision: _configRevision,
       intervalSeconds: _intervalSeconds,
+      gpuSelection: _gpuSelectionMode === "fixed"
+        ? { mode: "fixed", stableId: _gpuStableId }
+        : { mode: "auto" },
       silent: true
     }
     _pendingConfigurations[commandId] = command
     _sendConfiguration(command)
+  }
+
+  function _gpuResumeForActiveConfiguration() {
+    if (!_hasGpuSessionState) return null
+    if (_gpuSelectionMode === "auto") {
+      return _sessionAutoStatus === "selected"
+        ? { autoStatus: "selected", stableId: _sessionAutoStableId }
+        : { autoStatus: _sessionAutoStatus }
+    }
+    return {
+      fixedRetryStage: _fixedGpuRetryStage,
+      fixedRetryAt: _fixedGpuRetryAt
+    }
+  }
+
+  function _publicGpuSelection(selection) {
+    return selection.stableId === undefined
+      ? { mode: selection.mode, status: selection.status }
+      : {
+          mode: selection.mode,
+          status: selection.status,
+          stableId: selection.stableId
+        }
+  }
+
+  function _captureGpuSessionState(state) {
+    _hasGpuSessionState = true
+    if (state.selection.mode === "auto") {
+      _sessionAutoStatus = state.selection.status
+      _sessionAutoStableId = state.selection.status === "selected"
+        ? state.selection.stableId : ""
+      _fixedGpuRetryStage = 0
+      _fixedGpuRetryAt = -1
+      return
+    }
+    _sessionAutoStatus = "none"
+    _sessionAutoStableId = ""
+    _fixedGpuRetryStage = state.fixedRetryStage
+    _fixedGpuRetryAt = state.fixedRetryAt
   }
 
   function _immutable(value) {
@@ -152,6 +273,7 @@ Item {
       cpu: _current.cpu,
       ram: _current.ram,
       gpu: _current.gpu,
+      selection: _current.selection,
       source: _current.source
     }
     var keys = Object.keys(changes)
@@ -342,6 +464,8 @@ Item {
     _stdoutBuffer = ""
     _stdoutBufferBytes = 0
     _discardingStdoutLine = false
+    _awaitingGpuResume = false
+    _provisionalGpuInventory = null
     stableTimer.restart()
   }
 
@@ -452,8 +576,14 @@ Item {
       _sequence = 0
       _observeHelperClock(message.publishedAtMs, _nowMs())
       _publishSource({ status: "running" })
+      _awaitingGpuResume = _gpuResumeForActiveConfiguration() !== null
       _sendActiveConfiguration()
       _sendPendingConfigurations()
+      _sendPendingGpuInventoryRefreshes()
+      return
+    }
+    if (message.type === "gpuInventory") {
+      _handleGpuInventory(message)
       return
     }
     if (message.type === "ack" || message.type === "reject") {
@@ -476,6 +606,11 @@ Item {
         || !_validCpuMetric(message.cpu)
         || !_validRamMetric(message.ram)
         || !_validGpuMetric(message.gpu)
+        || !_validGpuSelectionState(message.selection)
+        || (message.gpuState !== undefined
+            && (!_validGpuSessionState(message.gpuState)
+                || !_sameGpuSelectionState(message.gpuState.selection,
+                                           message.selection)))
         || !message.source
         || message.source.status !== "running"
         || (message.cpu.status === "available"
@@ -506,6 +641,10 @@ Item {
     }
     _failureSince = -1
 
+    if (!_awaitingGpuResume && message.gpuState !== undefined) {
+      _captureGpuSessionState(message.gpuState)
+    }
+
     _sequence = message.sequence
     _publishSnapshotChanges({
       schemaVersion: message.schemaVersion,
@@ -517,8 +656,52 @@ Item {
       cpu: cpuMetric,
       ram: ramMetric,
       gpu: message.gpu,
+      selection: _publicGpuSelection(message.selection),
       source: { status: "running" }
     })
+  }
+
+  function _handleGpuInventory(message) {
+    if (!_helloReceived
+        || message.generation !== _generation
+        || !Number.isSafeInteger(message.revision)
+        || (_gpuInventoryGeneration === _generation
+            && message.revision <= _gpuInventory.revision)
+        || !Number.isInteger(message.discoveredAtMs)
+        || message.discoveredAtMs < 0
+        || !Array.isArray(message.devices)
+        || message.devices.length > 32
+        || (message.gpuState !== undefined
+            && !_validGpuSessionState(message.gpuState))) {
+      _publishProtocolError()
+      return
+    }
+    var stableIds = ({})
+    for (var i = 0; i < message.devices.length; i++) {
+      var device = message.devices[i]
+      if (!_validGpuDevice(device) || stableIds[device.stableId]) {
+        _publishProtocolError()
+        return
+      }
+      stableIds[device.stableId] = true
+    }
+    if (_awaitingGpuResume) {
+      _provisionalGpuInventory = message
+      return
+    }
+    _publishGpuInventory(message)
+  }
+
+  function _publishGpuInventory(message) {
+    _gpuInventoryGeneration = _generation
+    _gpuInventory = _immutable({
+      revision: message.revision,
+      discoveredAtMs: message.discoveredAtMs,
+      devices: message.devices
+    })
+    if (!_awaitingGpuResume && message.gpuState !== undefined) {
+      _captureGpuSessionState(message.gpuState)
+    }
   }
 
   function _handleCommandResult(message) {
@@ -530,11 +713,13 @@ Item {
       return
     }
     var command = _pendingConfigurations[message.commandId]
+    if (!command) command = _pendingGpuInventoryRefreshes[message.commandId]
     if (!command) {
       _publishProtocolError()
       return
     }
-    delete _pendingConfigurations[message.commandId]
+    if (command.type === "configure") delete _pendingConfigurations[message.commandId]
+    else delete _pendingGpuInventoryRefreshes[message.commandId]
 
     if (message.type === "reject") {
       var rejectCode = message.error === "invalidConfiguration"
@@ -543,14 +728,45 @@ Item {
       if (rejectCode === "protocolError") _publishProtocolError()
       return
     }
+    if (command.type === "refreshGpuInventory") {
+      if (message.command !== "refreshGpuInventory") {
+        commandSettled(message.commandId, false, "protocolError")
+        _publishProtocolError()
+      } else {
+        commandSettled(message.commandId, true, "")
+      }
+      return
+    }
     if (message.configRevision !== command.configRevision
-        || message.intervalSeconds !== command.intervalSeconds) {
+        || message.intervalSeconds !== command.intervalSeconds
+        || !_sameGpuSelection(message.gpuSelection, command.gpuSelection)
+        || (message.gpuState !== undefined
+            && (!_validGpuSessionState(message.gpuState)
+                || message.gpuState.selection.mode !== command.gpuSelection.mode))) {
       if (!command.silent) commandSettled(message.commandId, false, "protocolError")
       _publishProtocolError()
       return
     }
     _configRevision = command.configRevision
     _intervalSeconds = command.intervalSeconds
+    _gpuSelectionMode = command.gpuSelection.mode
+    _gpuStableId = command.gpuSelection.mode === "fixed"
+      ? command.gpuSelection.stableId : ""
+    var resumeProvedDisappearance = command.silent
+      && _awaitingGpuResume
+      && _current.selection.status === "selected"
+      && message.gpuState !== undefined
+      && (message.gpuState.selection.status !== "selected"
+          || String(message.gpuState.selection.stableId || "")
+             !== String(_current.selection.stableId || ""))
+    if (resumeProvedDisappearance && _provisionalGpuInventory !== null) {
+      _publishGpuInventory(_provisionalGpuInventory)
+    }
+    if (message.gpuState !== undefined) _captureGpuSessionState(message.gpuState)
+    if (command.silent) {
+      _awaitingGpuResume = false
+      _provisionalGpuInventory = null
+    }
     _expectedSampleAtMs = _nowMs() + _intervalSeconds * _secondMs
     if (!command.silent) commandSettled(message.commandId, true, "")
   }
@@ -615,7 +831,69 @@ Item {
   }
 
   function _validGpuMetric(metric) {
-    return _validMetricState(metric, false) && metric.status === "unavailable"
+    if (!_validMetricState(metric, false) || metric.status !== "unavailable") return false
+    if (typeof metric.error.pathId !== "string" || metric.error.pathId.length === 0
+        || typeof metric.error.diagnostic !== "string"
+        || metric.error.diagnostic.length === 0) return false
+    if (metric.error.stableId !== undefined
+        && !_validStableGpuId(metric.error.stableId)) return false
+    return metric.retryAt === undefined
+      || (Number.isInteger(metric.retryAt) && metric.retryAt >= 0)
+  }
+
+  function _sameGpuSelection(left, right) {
+    return _validGpuSelectionPolicy(left)
+      && _validGpuSelectionPolicy(right)
+      && left.mode === right.mode
+      && String(left.stableId || "") === String(right.stableId || "")
+  }
+
+  function _validGpuSelectionState(selection) {
+    if (!selection || typeof selection !== "object") return false
+    if (selection.mode === "fixed") {
+      return (selection.status === "selected" || selection.status === "missing")
+        && _validStableGpuId(selection.stableId)
+    }
+    if (selection.mode !== "auto" || selection.status === "missing") return false
+    if (selection.status === "selected") return _validStableGpuId(selection.stableId)
+    return (selection.status === "none" || selection.status === "required")
+      && selection.stableId === undefined
+  }
+
+  function _sameGpuSelectionState(left, right) {
+    return _validGpuSelectionState(left)
+      && _validGpuSelectionState(right)
+      && left.mode === right.mode
+      && left.status === right.status
+      && String(left.stableId || "") === String(right.stableId || "")
+  }
+
+  function _validGpuSessionState(state) {
+    if (!state || typeof state !== "object"
+        || !_validGpuSelectionState(state.selection)
+        || !Number.isInteger(state.fixedRetryStage)
+        || state.fixedRetryStage < 0 || state.fixedRetryStage > 3
+        || !Number.isSafeInteger(state.fixedRetryAt)
+        || state.fixedRetryAt < -1) return false
+    if (state.selection.mode === "auto"
+        || state.selection.status === "selected") {
+      return state.fixedRetryStage === 0 && state.fixedRetryAt === -1
+    }
+    if (state.fixedRetryStage === 3) return state.fixedRetryAt === -1
+    return state.fixedRetryAt >= 0
+  }
+
+  function _validGpuDevice(device) {
+    return device
+      && typeof device === "object"
+      && _validStableGpuId(device.stableId)
+      && typeof device.label === "string"
+      && device.label.length > 0
+      && ["intel", "amd", "nvidia"].indexOf(device.vendor) >= 0
+      && typeof device.pciBdf === "string"
+      && /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(device.pciBdf)
+      && ["yes", "no", "unknown"].indexOf(device.displayRelation) >= 0
+      && typeof device.selectable === "boolean"
   }
 
   Process {

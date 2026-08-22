@@ -93,7 +93,10 @@ static void emit_snapshot_at(uint64_t generation, uint64_t sequence,
          "\"path\":\"scripted\"},"
          "\"gpu\":{\"status\":\"unavailable\","
          "\"error\":{\"code\":\"dependencyMissing\",\"scope\":\"gpu\","
-         "\"retryability\":\"nonRetryable\"},\"since\":%" PRId64 "},"
+         "\"retryability\":\"nonRetryable\",\"pathId\":\"gpu-measurement\","
+         "\"diagnostic\":\"scripted GPU metric is unavailable\"},"
+         "\"since\":%" PRId64 "},"
+         "\"selection\":{\"mode\":\"auto\",\"status\":\"none\"},"
          "\"source\":{\"status\":\"running\"}}\n",
          generation, sequence, published_at_ms, percent, sampled_at_ms,
          sampled_at_ms, published_at_ms);

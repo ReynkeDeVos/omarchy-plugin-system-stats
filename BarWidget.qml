@@ -25,6 +25,156 @@ BarWidget {
   readonly property string ramDisplayUnit: ramDisplayFormat === "gib" ? " GiB" : "%"
   readonly property bool warningVisible: !initializing && !cpuVisible && !ramVisible && !gpuVisible
   readonly property color metricColor: bar ? bar.barForeground : Color.foreground
+  readonly property bool opened: popupOpen
+  readonly property var gpuInventory: session ? session.gpuInventory : ({ revision: 0, devices: [] })
+  readonly property var gpuOptions: buildGpuOptions()
+  readonly property string selectedGpuStableId: snapshot && snapshot.selection
+    && snapshot.selection.stableId ? String(snapshot.selection.stableId) : ""
+  readonly property var selectedGpuDevice: findGpuDevice(selectedGpuStableId)
+  readonly property string selectedGpuValue: {
+    var selection = persistedGpuSelection()
+    return selection.mode === "fixed" ? selection.stableId : "auto"
+  }
+  property bool popupOpen: false
+  property string settingsError: ""
+  property int _nextSettingsRevision: 1
+
+  function open() {
+    if (popupOpen) return
+    popupOpen = true
+    if (session) session.refreshGpuInventory()
+  }
+
+  function close() { popupOpen = false }
+  function toggle() { popupOpen ? close() : open() }
+
+  function persistedGpuSelection() {
+    var selection = setting("gpuSelection", { mode: "auto", configRevision: 0 })
+    if (!selection || typeof selection !== "object")
+      return { mode: "auto", configRevision: 0 }
+    if (selection.mode === "fixed" && validStableGpuId(selection.stableId)) {
+      return {
+        mode: "fixed",
+        stableId: selection.stableId,
+        configRevision: Number(selection.configRevision) || 0
+      }
+    }
+    return { mode: "auto", configRevision: Number(selection.configRevision) || 0 }
+  }
+
+  function validStableGpuId(stableId) {
+    if (typeof stableId !== "string") return false
+    return /^pci:[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(stableId)
+      || /^nvidia:GPU-[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$/.test(stableId)
+  }
+
+  function configurePersistedSelection() {
+    if (!session) return
+    var selection = persistedGpuSelection()
+    var revision = Number.isSafeInteger(selection.configRevision)
+      && selection.configRevision >= 0 ? selection.configRevision : 0
+    _nextSettingsRevision = Math.max(_nextSettingsRevision, revision + 1,
+                                     Number(session.current.configRevision) + 1)
+    if (revision === 0 && selection.mode === "auto"
+        && Number(session.current.configRevision) === 0) return
+    session.configure({
+      configRevision: revision,
+      intervalSeconds: configuredIntervalSeconds(),
+      gpuSelection: selection.mode === "fixed"
+        ? { mode: "fixed", stableId: selection.stableId }
+        : { mode: "auto" }
+    })
+  }
+
+  function configuredIntervalSeconds() {
+    var interval = Number(setting("intervalSeconds", 2))
+    return Number.isInteger(interval) && interval >= 2 && interval <= 10
+      ? interval : 2
+  }
+
+  function buildGpuOptions() {
+    var options = [{ value: "auto", label: "Auto" }]
+    var devices = gpuInventory.devices || []
+    for (var i = 0; i < devices.length; i++) {
+      if (!devices[i].selectable) continue
+      options.push({
+        value: devices[i].stableId,
+        label: gpuOptionLabel(devices[i]),
+        device: devices[i]
+      })
+    }
+    return options
+  }
+
+  function gpuOptionLabel(device) {
+    return device.label + " · " + gpuVendorName(device)
+      + " · " + gpuDisplayName(device) + " · " + device.stableId
+  }
+
+  function gpuVendorName(device) {
+    return device.vendor === "amd" ? "AMD"
+      : (device.vendor === "nvidia" ? "NVIDIA" : "Intel")
+  }
+
+  function gpuDisplayName(device) {
+    return device.displayRelation === "yes" ? "display connected"
+      : (device.displayRelation === "no" ? "display not connected" : "display unknown")
+  }
+
+  function findGpuDevice(stableId) {
+    var devices = gpuInventory.devices || []
+    for (var i = 0; i < devices.length; i++) {
+      if (devices[i].stableId === stableId) return devices[i]
+    }
+    return null
+  }
+
+  function selectionSummary() {
+    if (!snapshot || !snapshot.selection) return "Detecting GPU devices…"
+    if (snapshot.selection.status === "required") return "Choose a GPU for this multi-GPU system."
+    if (snapshot.selection.status === "missing")
+      return "The fixed GPU is missing: " + snapshot.selection.stableId
+    if (snapshot.selection.status === "none") return "No selectable GPU was detected."
+    return selectedGpuDevice ? selectedGpuDevice.label : snapshot.selection.stableId
+  }
+
+  function selectGpu(value) {
+    if (!session) return
+    value = String(value)
+    if (value !== "auto") {
+      var device = findGpuDevice(value)
+      if (!device || !device.selectable) {
+        settingsError = "That GPU is no longer available. Reopen the picker to refresh it."
+        return
+      }
+    }
+    if (value === selectedGpuValue) return
+    var selection = value === "auto"
+      ? { mode: "auto" }
+      : { mode: "fixed", stableId: value }
+    var revision = Math.max(_nextSettingsRevision,
+                            Number(session.current.configRevision) + 1)
+    _nextSettingsRevision = revision + 1
+    var persisted = selection.mode === "fixed"
+      ? { mode: "fixed", stableId: selection.stableId, configRevision: revision }
+      : { mode: "auto", configRevision: revision }
+    var registry = bar && bar.shell ? bar.shell.pluginRegistry : null
+    if (!registry || typeof registry.setBarWidget !== "function") {
+      settingsError = "Omarchy Settings is unavailable."
+      return
+    }
+    var error = registry.setBarWidget(moduleName, "gpuSelection", persisted, {})
+    if (error) {
+      settingsError = "GPU selection could not be saved: " + error
+      return
+    }
+    settingsError = ""
+    session.configure({
+      configRevision: revision,
+      intervalSeconds: configuredIntervalSeconds(),
+      gpuSelection: selection
+    })
+  }
 
   function formatGiB(bytes) {
     return (Number(bytes) / 1073741824).toFixed(1)
@@ -47,8 +197,10 @@ BarWidget {
   implicitWidth: content.implicitWidth + Style.space(10)
   implicitHeight: barSize
 
-  Accessible.role: Accessible.StaticText
+  Accessible.role: Accessible.Button
   Accessible.name: accessibleDescription()
+
+  onSettingsChanged: Qt.callLater(configurePersistedSelection)
 
   onMetricColorChanged: {
     cpuIcon.requestPaint()
@@ -234,4 +386,138 @@ BarWidget {
       renderType: Text.NativeRendering
     }
   }
+
+  MouseArea {
+    anchors.fill: parent
+    acceptedButtons: Qt.LeftButton
+    cursorShape: Qt.PointingHandCursor
+    onClicked: root.toggle()
+  }
+
+  PopupCard {
+    id: detailPanel
+
+    anchorItem: root
+    bar: root.bar
+    owner: root
+    open: root.popupOpen
+    contentWidth: detailPanel.fittedContentWidth(Style.space(460))
+    contentHeight: detailPanel.fittedContentHeight(panelContent.implicitHeight)
+
+    Column {
+      id: panelContent
+
+      anchors.fill: parent
+      spacing: Style.space(10)
+
+      Text {
+        width: parent.width
+        text: "GPU device"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.subtitle
+        font.bold: true
+      }
+
+      Text {
+        width: parent.width
+        text: root.selectionSummary()
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.Wrap
+      }
+
+      Text {
+        width: parent.width
+        text: "Selection"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+
+      ListView {
+        id: gpuPicker
+
+        width: parent.width
+        height: Math.min(contentHeight, Style.space(300))
+        spacing: Style.space(4)
+        model: root.gpuOptions
+        clip: true
+        interactive: contentHeight > height
+        boundsBehavior: Flickable.StopAtBounds
+
+        delegate: Button {
+          id: optionButton
+
+          required property var modelData
+          readonly property var device: modelData.device || null
+
+          width: gpuPicker.width
+          height: device ? Style.space(64) : Style.space(42)
+          selected: root.selectedGpuValue === String(modelData.value)
+          bordered: true
+          focusable: true
+          foreground: root.bar ? root.bar.foreground : Color.foreground
+          accent: Color.accent
+          onClicked: root.selectGpu(modelData.value)
+
+          Column {
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.spacing.controlPaddingX
+            anchors.rightMargin: Style.spacing.controlPaddingX
+            spacing: Style.space(2)
+
+            Text {
+              width: parent.width
+              text: optionButton.device ? optionButton.device.label : "Auto"
+              color: optionButton.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              font.bold: optionButton.selected
+              elide: Text.ElideRight
+            }
+
+            Text {
+              visible: optionButton.device !== null
+              width: parent.width
+              text: optionButton.device
+                ? root.gpuVendorName(optionButton.device) + " · "
+                  + root.gpuDisplayName(optionButton.device)
+                : ""
+              color: optionButton.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            Text {
+              width: parent.width
+              text: optionButton.device ? optionButton.device.stableId
+                : "Keep the current device when it remains available"
+              color: optionButton.foreground
+              font.family: root.bar ? root.bar.fontFamily : Style.font.family
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+          }
+        }
+      }
+
+      Text {
+        visible: root.settingsError !== ""
+        width: parent.width
+        text: root.settingsError
+        color: Color.urgent
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.Wrap
+      }
+    }
+  }
+
+  Component.onCompleted: Qt.callLater(configurePersistedSelection)
 }

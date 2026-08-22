@@ -1,0 +1,2 @@
+pci:0000:00:02.0	Intel Meteor Lake-P Graphics	intel	0000:00:02.0	yes	1
+nvidia:GPU-22222222-2222-2222-2222-222222222222	NVIDIA GeForce RTX Fixture	nvidia	0000:01:00.0	no	1
