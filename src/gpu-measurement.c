@@ -1890,7 +1890,8 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
     return (GpuObservation){0};
 
   const char *sample_log_path = getenv("SYSTEM_STATS_GPU_SAMPLE_LOG");
-  if (sample_log_path != NULL && sample_log_path[0] != '\0') {
+  if (reader->options->fixture_system && sample_log_path != NULL &&
+      sample_log_path[0] != '\0') {
     FILE *sample_log = fopen(sample_log_path, "ae");
     if (sample_log != NULL) {
       const char *vendor = reader->adapter->vendor == GPU_VENDOR_INTEL ? "intel"
