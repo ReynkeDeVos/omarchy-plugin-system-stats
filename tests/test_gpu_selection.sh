@@ -29,6 +29,7 @@ run_case() {
   output=$(SYSTEM_STATS_GPU_CASE="$case_name" \
     SYSTEM_STATS_GPU_INVENTORY_FILE="$inventory_file" \
     SYSTEM_STATS_GPU_PRESENCE_FILE="$presence_file" \
+    SYSTEM_STATS_NVML_LIBRARY="$test_dir/missing-nvml.so" \
     SYSTEM_STATS_SECOND_MS="$second_ms" \
     QT_QPA_PLATFORM=offscreen \
     timeout 15s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
@@ -104,6 +105,7 @@ run_restart_case() {
   output=$(SYSTEM_STATS_GPU_CASE="$case_name" \
     SYSTEM_STATS_GPU_INVENTORY_FILE="$inventory_file" \
     SYSTEM_STATS_GPU_PRESENCE_FILE="$presence_file" \
+    SYSTEM_STATS_NVML_LIBRARY="$test_dir/missing-nvml.so" \
     SYSTEM_STATS_RESTART_MARKER_DIR="$marker_dir" \
     SYSTEM_STATS_RESTART_CONDITION="$restart_condition" \
     SYSTEM_STATS_RESTART_OBSERVATION_FILE="$test_dir/$case_name.output" \

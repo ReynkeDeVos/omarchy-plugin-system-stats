@@ -46,6 +46,7 @@ typedef struct {
   const char *amd_proc_frames_root;
   const char *event_source_root;
   const char *pci_devices_root;
+  const char *nvml_library_path;
   bool fixture_system;
   bool fixture_pmu_system;
   long interval_ms;
@@ -126,6 +127,7 @@ static Options parse_options(int argc, char **argv) {
   const char *amd_proc_frames_root = getenv("SYSTEM_STATS_AMD_PROC_FRAMES");
   const char *event_source_root = getenv("SYSTEM_STATS_EVENT_SOURCE_ROOT");
   const char *pci_devices_root = getenv("SYSTEM_STATS_PCI_DEVICES_ROOT");
+  const char *nvml_library_path = getenv("SYSTEM_STATS_NVML_LIBRARY");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
   const char *second_text = getenv("SYSTEM_STATS_SECOND_MS");
   Options options = {
@@ -168,11 +170,16 @@ static Options parse_options(int argc, char **argv) {
       .pci_devices_root = pci_devices_root != NULL && *pci_devices_root != '\0'
                               ? pci_devices_root
                               : "/sys/bus/pci/devices",
+      .nvml_library_path =
+          nvml_library_path != NULL && *nvml_library_path != '\0'
+              ? nvml_library_path
+              : "libnvidia-ml.so.1",
       .fixture_system = gpu_inventory_path != NULL || drm_root != NULL ||
                         nvidia_root != NULL || udev_data_root != NULL ||
                         proc_root != NULL || intel_proc_frames_root != NULL ||
                         amd_proc_frames_root != NULL ||
-                        event_source_root != NULL || pci_devices_root != NULL,
+                        event_source_root != NULL || pci_devices_root != NULL ||
+                        nvml_library_path != NULL,
       .fixture_pmu_system =
           event_source_root != NULL && *event_source_root != '\0' &&
           pci_devices_root != NULL && *pci_devices_root != '\0',
@@ -840,6 +847,7 @@ int main(int argc, char **argv) {
       .fixture_amd_proc_frames_root = options.amd_proc_frames_root,
       .event_source_root = options.event_source_root,
       .pci_devices_root = options.pci_devices_root,
+      .nvml_library_path = options.nvml_library_path,
       .fixture_system = options.fixture_system,
       .fixture_pmu_system = options.fixture_pmu_system,
   };

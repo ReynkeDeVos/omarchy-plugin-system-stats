@@ -216,7 +216,8 @@ ShellRoot {
     if (stage === 4 && session.gpuInventory.revision >= stableRevision + 1
         && snapshot.selection.status === "selected") {
       if (!verify(snapshot.selection.stableId === nvidiaId, "returning fixed identity restored")) return
-      if (!verify(snapshot.gpu.error.code === "noTrueEnginePath", "returned GPU has honest metric error")) return
+      if (!verify(snapshot.gpu.error.code === "dependencyMissing",
+                  "returned GPU reports the missing NVML dependency")) return
       finish("fixed GPU retries, pauses, and returns through SystemStatsSession")
     }
   }
