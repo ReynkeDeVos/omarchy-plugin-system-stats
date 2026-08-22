@@ -25,11 +25,13 @@ ShellRoot {
     if (!verify(widget.cpuVisible && widget.ramVisible,
                 "GPU failure leaves CPU and RAM visible")) return
     if (!verify(!widget.gpuVisible, "unavailable GPU value is not shown as a percentage")) return
-    if (!verify(widget.gpuErrorVisible, "GPU error marker is visible in the bar")) return
-    if (!verify(widget.gpuDisplayValue === "!", "GPU error marker replaces the value")) return
+    if (!verify(widget.gpuUnavailable, "the GPU failure remains observable")) return
+    if (!verify(widget.gpuDisplayValue === "", "the failed GPU publishes no bar value")) return
+    if (!verify(!widget.gpuMetricVisible,
+                "an unavailable GPU metric is fully hidden from the bar")) return
     if (!verify(!widget.warningVisible, "healthy host metrics avoid a global warning")) return
-    if (!verify(widget.Accessible.name.indexOf("GPU Messwert nicht verfügbar") !== -1,
-                "GPU error marker has an accessible description")) return
+    if (!verify(widget.Accessible.name.indexOf("GPU metric unavailable") !== -1,
+                "the hidden GPU failure has an accessible description")) return
     if (!verify(widget.gpuStatusSummary()
                 === "GPU counters are not readable with the current permissions.",
                 "detail panel explains the permission failure")) return
@@ -40,7 +42,7 @@ ShellRoot {
     widget.open()
     if (!verify(widget.opened, "detail panel opens for the GPU failure")) return
     finished = true
-    console.log("TEST-PASS: Intel GPU error is visible without hiding CPU or RAM")
+    console.log("TEST-PASS: Intel GPU error is detailed without cluttering the bar")
     Qt.quit()
   }
 

@@ -35,7 +35,7 @@ ShellRoot {
                 "detail panel names the Nvidia measurement path")) return
     if (!verify(widget.gpuEvidenceSummary() === "Fixture-tested",
                 "detail panel names the fixture evidence")) return
-    if (!verify(widget.Accessible.name.indexOf("GPU 47 Prozent") !== -1,
+    if (!verify(widget.Accessible.name.indexOf("GPU 47 percent") !== -1,
                 "Nvidia usage is included in the accessible bar name")) return
     widget.open()
     if (!verify(widget.opened, "detail panel opens for the Nvidia value")) return

@@ -31,7 +31,7 @@ SYSTEM_STATS_REVIEW_DIR="$review_dir" \
   SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
   SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/hybrid.presence" \
   SYSTEM_STATS_INTEL_PROC_FRAMES="$test_dir/fixtures/gpu/intel/i915" \
-  SYSTEM_STATS_INTERVAL_MS=250 \
+  SYSTEM_STATS_INTERVAL_MS=1000 \
   QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml"
 

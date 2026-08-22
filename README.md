@@ -2,9 +2,11 @@
 
 System Stats is an Omarchy Quattro plugin that puts compact, shared CPU, RAM, and GPU metrics in each screen's bar. A session-wide service owns one long-lived native helper, so adding a screen does not add another sampler or timer.
 
-RAM appears as a whole percentage by default. Omarchy's bar settings can switch it to used/total IEC GiB with one decimal place; the change reuses the current sample and keeps the widget width stable.
+RAM appears as a whole percentage by default. You can switch it to used/total IEC GiB in the detail panel. The widget reuses the current sample and keeps its width stable.
 
-Click the widget to inspect GPU status and choose a device. The panel names the active measurement path, evidence level, and any error. Device names come from the NVIDIA driver or udev's hardware database when available. Auto selects the sole GPU or the only GPU connected to a display. Systems with several plausible GPUs ask you to choose. The plugin saves a fixed choice as a PCI BDF or NVIDIA UUID through Omarchy settings, so device enumeration order cannot change it. GPU utilization stays hidden until a vendor measurement path can report a real value.
+Left-click the widget to toggle the detail panel. The panel shows CPU, RAM, and GPU status, last success, measurement path, errors, and the shared source state. It also controls the two-to-ten-second sampling interval, RAM format, and GPU selection. Right-click opens `btop` in your terminal; a failed launch leaves the metrics unchanged.
+
+Device names come from the NVIDIA driver or udev's hardware database when available. Auto selects the sole GPU or the only GPU connected to a display. Systems with several plausible GPUs ask you to choose. The plugin saves a fixed choice as a PCI BDF or NVIDIA UUID through Omarchy settings, so device enumeration order cannot change it. GPU utilization stays hidden until a vendor measurement path can report a real value.
 
 ## Install
 
