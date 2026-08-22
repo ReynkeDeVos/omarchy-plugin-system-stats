@@ -43,6 +43,7 @@ typedef struct {
   const char *udev_data_root;
   const char *proc_root;
   const char *intel_proc_frames_root;
+  const char *amd_proc_frames_root;
   const char *event_source_root;
   const char *pci_devices_root;
   bool fixture_system;
@@ -122,6 +123,7 @@ static Options parse_options(int argc, char **argv) {
   const char *udev_data_root = getenv("SYSTEM_STATS_UDEV_DATA_ROOT");
   const char *proc_root = getenv("SYSTEM_STATS_PROC_ROOT");
   const char *intel_proc_frames_root = getenv("SYSTEM_STATS_INTEL_PROC_FRAMES");
+  const char *amd_proc_frames_root = getenv("SYSTEM_STATS_AMD_PROC_FRAMES");
   const char *event_source_root = getenv("SYSTEM_STATS_EVENT_SOURCE_ROOT");
   const char *pci_devices_root = getenv("SYSTEM_STATS_PCI_DEVICES_ROOT");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
@@ -155,6 +157,10 @@ static Options parse_options(int argc, char **argv) {
           intel_proc_frames_root != NULL && *intel_proc_frames_root != '\0'
               ? intel_proc_frames_root
               : NULL,
+      .amd_proc_frames_root =
+          amd_proc_frames_root != NULL && *amd_proc_frames_root != '\0'
+              ? amd_proc_frames_root
+              : NULL,
       .event_source_root =
           event_source_root != NULL && *event_source_root != '\0'
               ? event_source_root
@@ -165,6 +171,7 @@ static Options parse_options(int argc, char **argv) {
       .fixture_system = gpu_inventory_path != NULL || drm_root != NULL ||
                         nvidia_root != NULL || udev_data_root != NULL ||
                         proc_root != NULL || intel_proc_frames_root != NULL ||
+                        amd_proc_frames_root != NULL ||
                         event_source_root != NULL || pci_devices_root != NULL,
       .fixture_pmu_system =
           event_source_root != NULL && *event_source_root != '\0' &&
@@ -829,7 +836,8 @@ int main(int argc, char **argv) {
                           inventory_started_at);
   GpuMeasurementOptions measurement_options = {
       .proc_root = options.proc_root,
-      .fixture_proc_frames_root = options.intel_proc_frames_root,
+      .fixture_intel_proc_frames_root = options.intel_proc_frames_root,
+      .fixture_amd_proc_frames_root = options.amd_proc_frames_root,
       .event_source_root = options.event_source_root,
       .pci_devices_root = options.pci_devices_root,
       .fixture_system = options.fixture_system,
