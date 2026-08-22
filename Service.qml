@@ -893,7 +893,8 @@ Item {
       && _validStableGpuId(metric.value.device.stableId)
       && typeof metric.value.device.pciBdf === "string"
       && /^\d{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(metric.value.device.pciBdf)
-      && metric.value.device.stableId === "pci:" + metric.value.device.pciBdf
+      && (metric.value.device.stableId.indexOf("nvidia:GPU-") === 0
+          || metric.value.device.stableId === "pci:" + metric.value.device.pciBdf)
       && metric.value.semantics === "graphicsEngineBusy"
       && Number.isInteger(metric.value.actualWindowMs)
       && metric.value.actualWindowMs > 0

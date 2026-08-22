@@ -13,6 +13,7 @@ typedef struct {
   const char *fixture_amd_proc_frames_root;
   const char *event_source_root;
   const char *pci_devices_root;
+  const char *nvml_library_path;
   bool fixture_system;
   bool fixture_pmu_system;
 } GpuMeasurementOptions;

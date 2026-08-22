@@ -10,13 +10,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$test_dir/bin" "$test_dir/fixtures/cpu"
+mkdir -p "$test_dir/bin" "$test_dir/fixtures/cpu" "$test_dir/fixtures/gpu"
 cp "$repo_root/Service.qml" "$test_dir/Service.qml"
 cp "$repo_root/tests/qml/configuration_harness.qml" "$test_dir/shell.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/bin/system-stats-helper"
 cp "$repo_root/tests/fixtures/cpu/reconfigure.stat" "$test_dir/fixtures/cpu/reconfigure.stat"
+cp "$repo_root/tests/fixtures/gpu/empty.inventory" "$test_dir/fixtures/gpu/inventory"
+cp "$repo_root/tests/fixtures/gpu/empty.inventory" "$test_dir/fixtures/gpu/presence"
 
 output=$(SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/reconfigure.stat" \
+  SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/inventory" \
+  SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/presence" \
   SYSTEM_STATS_SECOND_MS=12 \
   QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {

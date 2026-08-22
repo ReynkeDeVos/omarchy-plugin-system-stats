@@ -18,6 +18,9 @@ ShellRoot {
   required property string vendorName
   property bool transientMustBeRetryable: false
   property bool verifyFrozen: false
+  property bool reopenAfterError: false
+  property bool reopenAfterSuccess: false
+  property bool reopened: false
   property bool finished: false
   property bool sawTransientError: false
   readonly property bool expectsRecovery: transientError !== ""
@@ -47,7 +50,12 @@ ShellRoot {
     }
 
     var expectedSequence = expectsRecovery ? 2 : 1
-    if (snapshot.sequence !== expectedSequence) return
+    if ((reopenAfterError || reopenAfterSuccess) && reopened) {
+      if (snapshot.configRevision !== 1 || snapshot.sequence < 3
+          || snapshot.phase === "initializing") return
+    } else if (snapshot.sequence !== expectedSequence) {
+      return
+    }
     if (expectsRecovery
         && !verify(sawTransientError,
                    "success follows a visible transient error")) return
@@ -61,6 +69,15 @@ ShellRoot {
       if (!GpuAssertions.verifyError(testRoot, snapshot, expectedError,
                                      expectedRetryability, stableId,
                                      expectedPath, verifyFrozen)) return
+      if (reopenAfterError && !reopened) {
+        reopened = true
+        session.configure({
+          configRevision: 1,
+          intervalSeconds: 3,
+          gpuSelection: { mode: "fixed", stableId: testRoot.stableId }
+        })
+        return
+      }
       finished = true
       console.log("TEST-PASS: " + expectedCase
                   + " GPU error through SystemStatsSession")
@@ -71,6 +88,15 @@ ShellRoot {
     if (!GpuAssertions.verifyValue(testRoot, snapshot, expectedPercent,
                                    stableId, pciBdf, expectedPath,
                                    verifyFrozen)) return
+    if (reopenAfterSuccess && !reopened) {
+      reopened = true
+      session.configure({
+        configRevision: 1,
+        intervalSeconds: 3,
+        gpuSelection: { mode: "fixed", stableId: testRoot.stableId }
+      })
+      return
+    }
     finished = true
     console.log("TEST-PASS: " + expectedCase
                 + " GPU usage through SystemStatsSession")

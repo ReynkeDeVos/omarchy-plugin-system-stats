@@ -4,11 +4,14 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <linux/perf_event.h>
 #include <math.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +22,10 @@ enum {
   DRM_MAX_CLIENTS = 256,
   DRM_MAX_ENGINES = 16,
   DRM_ENGINE_NAME_SIZE = 64,
-  INTEL_MAX_PMU_EVENTS = 32
+  INTEL_MAX_PMU_EVENTS = 32,
+  NVIDIA_UUID_SIZE = 96,
+  NVIDIA_PCI_BDF_SIZE = 32,
+  NVIDIA_CALL_TIMEOUT_MS = 250
 };
 
 typedef enum {
@@ -79,12 +85,14 @@ typedef enum {
 typedef enum {
   METRIC_ERROR_NONE,
   METRIC_ERROR_COUNTER_RESET,
+  METRIC_ERROR_DEPENDENCY_MISSING,
   METRIC_ERROR_DEVICE_MISSING,
   METRIC_ERROR_DEVICE_SUSPENDED,
   METRIC_ERROR_INSUFFICIENT_VISIBILITY,
   METRIC_ERROR_MALFORMED_COUNTER,
   METRIC_ERROR_NO_TRUE_ENGINE_PATH,
   METRIC_ERROR_PERMISSION_DENIED,
+  METRIC_ERROR_SAMPLE_TIMEOUT,
   METRIC_ERROR_SOURCE_UNREADABLE,
   METRIC_ERROR_UNSUPPORTED_DEVICE
 } MetricErrorCode;
@@ -112,6 +120,88 @@ typedef struct {
   unsigned int next_fixture_frame;
 } AmdReaderState;
 
+typedef int NvmlReturn;
+typedef void *NvmlDevice;
+
+enum {
+  NVML_SUCCESS = 0,
+  NVML_ERROR_INVALID_ARGUMENT = 2,
+  NVML_ERROR_NOT_SUPPORTED = 3,
+  NVML_ERROR_NO_PERMISSION = 4,
+  NVML_ERROR_NOT_FOUND = 6,
+  NVML_ERROR_INSUFFICIENT_POWER = 8,
+  NVML_ERROR_DRIVER_NOT_LOADED = 9,
+  NVML_ERROR_TIMEOUT = 10,
+  NVML_ERROR_IRQ_ISSUE = 11,
+  NVML_ERROR_LIBRARY_NOT_FOUND = 12,
+  NVML_ERROR_FUNCTION_NOT_FOUND = 13,
+  NVML_ERROR_GPU_IS_LOST = 15,
+  NVML_ERROR_RESET_REQUIRED = 16,
+  NVML_ERROR_OPERATING_SYSTEM = 17,
+  NVML_ERROR_LIB_RM_VERSION_MISMATCH = 18,
+  NVML_ERROR_NOT_READY = 27,
+  NVML_ERROR_GPU_NOT_FOUND = 28
+};
+
+typedef struct {
+  unsigned int gpu;
+  unsigned int memory;
+} NvmlUtilization;
+
+typedef NvmlReturn (*NvmlInit)(void);
+typedef NvmlReturn (*NvmlGetHandle)(const char *, NvmlDevice *);
+typedef NvmlReturn (*NvmlGetUuid)(NvmlDevice, char *, unsigned int);
+typedef NvmlReturn (*NvmlGetUtilization)(NvmlDevice, NvmlUtilization *);
+
+typedef struct {
+  NvmlInit init;
+  NvmlGetHandle get_handle_by_uuid;
+  NvmlGetHandle get_handle_by_pci_bdf;
+  NvmlGetUuid get_uuid;
+  NvmlGetUtilization get_utilization;
+} NvmlApi;
+
+typedef struct {
+  NvmlDevice device;
+  bool provider_available;
+  bool timed_out;
+  struct timespec baseline_at;
+} NvidiaReaderState;
+
+typedef struct {
+  void *library;
+  NvmlApi api;
+  bool initialized;
+} NvmlProvider;
+
+typedef enum {
+  NVIDIA_STAGE_NONE,
+  NVIDIA_STAGE_INIT,
+  NVIDIA_STAGE_UUID_LOOKUP,
+  NVIDIA_STAGE_PCI_LOOKUP,
+  NVIDIA_STAGE_PCI_UUID,
+  NVIDIA_STAGE_IDENTITY,
+  NVIDIA_STAGE_UTILIZATION
+} NvidiaCallStage;
+
+typedef struct {
+  NvmlApi api;
+  NvmlDevice device;
+  bool initialized;
+  bool identity_verified;
+  char uuid[NVIDIA_UUID_SIZE];
+  char pci_bdf[NVIDIA_PCI_BDF_SIZE];
+  NvidiaCallStage stage;
+  NvmlReturn result;
+  unsigned int percent;
+  atomic_uint references;
+} NvidiaCall;
+
+// NVML exposes no bounded shutdown operation. Keep one provider for the helper
+// lifetime so reader changes neither block nor accumulate library references.
+static NvmlProvider nvidia_provider = {0};
+static bool nvidia_provider_quarantined = false;
+
 typedef struct GpuReader GpuReader;
 
 typedef struct {
@@ -130,6 +220,7 @@ struct GpuReader {
   union {
     IntelReaderState intel;
     AmdReaderState amd;
+    NvidiaReaderState nvidia;
   } state;
 };
 
@@ -735,6 +826,8 @@ static const char *metric_error_name(MetricErrorCode code) {
   switch (code) {
   case METRIC_ERROR_COUNTER_RESET:
     return "counterReset";
+  case METRIC_ERROR_DEPENDENCY_MISSING:
+    return "dependencyMissing";
   case METRIC_ERROR_DEVICE_MISSING:
     return "deviceMissing";
   case METRIC_ERROR_DEVICE_SUSPENDED:
@@ -747,6 +840,8 @@ static const char *metric_error_name(MetricErrorCode code) {
     return "noTrueEnginePath";
   case METRIC_ERROR_PERMISSION_DENIED:
     return "permissionDenied";
+  case METRIC_ERROR_SAMPLE_TIMEOUT:
+    return "sampleTimeout";
   case METRIC_ERROR_SOURCE_UNREADABLE:
     return "sourceUnreadable";
   case METRIC_ERROR_UNSUPPORTED_DEVICE:
@@ -859,6 +954,8 @@ static const char *amd_diagnostic(MetricErrorCode code) {
     return "AMD engine counters could not be read";
   case METRIC_ERROR_MALFORMED_COUNTER:
     return "the selected AMD GPU load sensor returned an invalid percentage";
+  case METRIC_ERROR_DEPENDENCY_MISSING:
+  case METRIC_ERROR_SAMPLE_TIMEOUT:
   case METRIC_ERROR_NO_TRUE_ENGINE_PATH:
   case METRIC_ERROR_NONE:
     return "no documented AMD engine counter is available";
@@ -1046,6 +1143,270 @@ static void open_amd_reader(GpuReader *reader, struct timespec now) {
   prepare_amd_fdinfo(reader, now, true);
 }
 
+static bool load_nvml_symbol(void *library, const char *name, void *destination,
+                             size_t destination_size) {
+  void *symbol = dlsym(library, name);
+  if (symbol == NULL || destination_size != sizeof(symbol))
+    return false;
+  memcpy(destination, &symbol, sizeof(symbol));
+  return true;
+}
+
+static void open_nvidia_reader(GpuReader *reader, struct timespec now) {
+  NvidiaReaderState *state = &reader->state.nvidia;
+  state->baseline_at = baseline_instant(reader, now);
+  if (strncmp(reader->selected_stable_id, "nvidia:GPU-", 11) != 0) {
+    record_failure(reader, METRIC_ERROR_UNSUPPORTED_DEVICE, "nvidia-nvml", now);
+    return;
+  }
+  if (nvidia_provider_quarantined) {
+    state->timed_out = true;
+    record_failure(reader, METRIC_ERROR_SAMPLE_TIMEOUT, "nvidia-nvml", now);
+    return;
+  }
+
+  if (nvidia_provider.library == NULL) {
+    nvidia_provider.library =
+        dlopen(reader->options->nvml_library_path, RTLD_NOW | RTLD_LOCAL);
+    if (nvidia_provider.library == NULL) {
+      record_failure(reader, METRIC_ERROR_DEPENDENCY_MISSING, "nvidia-nvml",
+                     now);
+      return;
+    }
+
+    bool complete =
+        load_nvml_symbol(nvidia_provider.library, "nvmlInit_v2",
+                         &nvidia_provider.api.init,
+                         sizeof(nvidia_provider.api.init)) &&
+        load_nvml_symbol(nvidia_provider.library, "nvmlDeviceGetHandleByUUID",
+                         &nvidia_provider.api.get_handle_by_uuid,
+                         sizeof(nvidia_provider.api.get_handle_by_uuid)) &&
+        load_nvml_symbol(nvidia_provider.library,
+                         "nvmlDeviceGetHandleByPciBusId_v2",
+                         &nvidia_provider.api.get_handle_by_pci_bdf,
+                         sizeof(nvidia_provider.api.get_handle_by_pci_bdf)) &&
+        load_nvml_symbol(nvidia_provider.library, "nvmlDeviceGetUUID",
+                         &nvidia_provider.api.get_uuid,
+                         sizeof(nvidia_provider.api.get_uuid)) &&
+        load_nvml_symbol(nvidia_provider.library,
+                         "nvmlDeviceGetUtilizationRates",
+                         &nvidia_provider.api.get_utilization,
+                         sizeof(nvidia_provider.api.get_utilization));
+    if (!complete) {
+      dlclose(nvidia_provider.library);
+      nvidia_provider = (NvmlProvider){0};
+      record_failure(reader, METRIC_ERROR_DEPENDENCY_MISSING, "nvidia-nvml",
+                     now);
+      return;
+    }
+  }
+  state->provider_available = true;
+}
+
+static void release_nvidia_call(NvidiaCall *call) {
+  if (atomic_fetch_sub_explicit(&call->references, 1, memory_order_acq_rel) ==
+      1)
+    free(call);
+}
+
+static void *run_nvidia_call(void *argument) {
+  NvidiaCall *call = argument;
+  if (!call->initialized) {
+    call->stage = NVIDIA_STAGE_INIT;
+    call->result = call->api.init();
+    if (call->result != NVML_SUCCESS)
+      goto finished;
+    call->initialized = true;
+  }
+
+  if (call->device == NULL) {
+    call->stage = NVIDIA_STAGE_UUID_LOOKUP;
+    call->result = call->api.get_handle_by_uuid(call->uuid, &call->device);
+    if (call->result != NVML_SUCCESS)
+      goto finished;
+
+    NvmlDevice pci_device = NULL;
+    call->stage = NVIDIA_STAGE_PCI_LOOKUP;
+    call->result = call->api.get_handle_by_pci_bdf(call->pci_bdf, &pci_device);
+    if (call->result != NVML_SUCCESS)
+      goto finished;
+
+    char pci_uuid[NVIDIA_UUID_SIZE] = {0};
+    call->stage = NVIDIA_STAGE_PCI_UUID;
+    call->result = call->api.get_uuid(pci_device, pci_uuid, sizeof(pci_uuid));
+    if (call->result != NVML_SUCCESS)
+      goto finished;
+    call->stage = NVIDIA_STAGE_IDENTITY;
+    if (strcmp(pci_uuid, call->uuid) != 0)
+      goto finished;
+    call->identity_verified = true;
+  } else {
+    call->identity_verified = true;
+  }
+
+  NvmlUtilization utilization = {0};
+  call->stage = NVIDIA_STAGE_UTILIZATION;
+  call->result = call->api.get_utilization(call->device, &utilization);
+  if (call->result == NVML_SUCCESS)
+    call->percent = utilization.gpu;
+
+finished:
+  release_nvidia_call(call);
+  return NULL;
+}
+
+static MetricErrorCode nvidia_error_code(NvidiaCallStage stage,
+                                         NvmlReturn result) {
+  if (stage == NVIDIA_STAGE_IDENTITY || result == NVML_ERROR_NOT_FOUND ||
+      result == NVML_ERROR_GPU_NOT_FOUND || result == NVML_ERROR_GPU_IS_LOST ||
+      result == NVML_ERROR_INSUFFICIENT_POWER ||
+      result == NVML_ERROR_IRQ_ISSUE || result == NVML_ERROR_RESET_REQUIRED) {
+    return METRIC_ERROR_DEVICE_MISSING;
+  }
+  if (result == NVML_ERROR_DRIVER_NOT_LOADED ||
+      result == NVML_ERROR_LIBRARY_NOT_FOUND ||
+      result == NVML_ERROR_FUNCTION_NOT_FOUND ||
+      result == NVML_ERROR_LIB_RM_VERSION_MISMATCH) {
+    return METRIC_ERROR_DEPENDENCY_MISSING;
+  }
+  if (result == NVML_ERROR_NO_PERMISSION ||
+      result == NVML_ERROR_OPERATING_SYSTEM) {
+    return METRIC_ERROR_PERMISSION_DENIED;
+  }
+  if (result == NVML_ERROR_TIMEOUT)
+    return METRIC_ERROR_SAMPLE_TIMEOUT;
+  if (result == NVML_ERROR_NOT_READY)
+    return METRIC_ERROR_DEVICE_SUSPENDED;
+  if (result == NVML_ERROR_NOT_SUPPORTED)
+    return METRIC_ERROR_UNSUPPORTED_DEVICE;
+  return METRIC_ERROR_SOURCE_UNREADABLE;
+}
+
+static const char *nvidia_diagnostic(MetricErrorCode code,
+                                     NvidiaCallStage stage) {
+  switch (code) {
+  case METRIC_ERROR_DEPENDENCY_MISSING:
+    return stage == NVIDIA_STAGE_INIT
+               ? "the NVIDIA driver or its NVML runtime is unavailable"
+               : "the NVML library or a required NVML API is unavailable";
+  case METRIC_ERROR_DEVICE_MISSING:
+    return stage == NVIDIA_STAGE_IDENTITY
+               ? "the selected Nvidia UUID does not match its expected PCI "
+                 "device"
+               : "the selected Nvidia UUID is no longer available";
+  case METRIC_ERROR_DEVICE_SUSPENDED:
+    return "the selected Nvidia device is not ready, likely runtime-suspended";
+  case METRIC_ERROR_PERMISSION_DENIED:
+    return "NVML cannot access the selected Nvidia device with current "
+           "permissions";
+  case METRIC_ERROR_SAMPLE_TIMEOUT:
+    return "NVML did not return the selected Nvidia sample before its deadline";
+  case METRIC_ERROR_UNSUPPORTED_DEVICE:
+    return "NVML graphics utilization is unavailable for this device, "
+           "including MIG mode";
+  case METRIC_ERROR_MALFORMED_COUNTER:
+    return "NVML returned a graphics utilization percentage outside 0 to 100";
+  default:
+    return "NVML could not read graphics utilization for the selected Nvidia "
+           "device";
+  }
+}
+
+static GpuObservation nvidia_unavailable_observation(GpuReader *reader,
+                                                     MetricErrorCode code,
+                                                     NvidiaCallStage stage,
+                                                     struct timespec now) {
+  return unavailable_observation(reader, code, "nvidia-nvml",
+                                 nvidia_diagnostic(code, stage), now);
+}
+
+static GpuObservation observe_nvidia_reader(GpuReader *reader,
+                                            struct timespec now) {
+  NvidiaReaderState *state = &reader->state.nvidia;
+  if (!state->provider_available) {
+    MetricErrorCode code = reader->failure.code == METRIC_ERROR_NONE
+                               ? METRIC_ERROR_DEPENDENCY_MISSING
+                               : reader->failure.code;
+    return nvidia_unavailable_observation(reader, code, NVIDIA_STAGE_NONE, now);
+  }
+  if (state->timed_out) {
+    return nvidia_unavailable_observation(reader, METRIC_ERROR_SAMPLE_TIMEOUT,
+                                          NVIDIA_STAGE_UTILIZATION, now);
+  }
+
+  NvidiaCall *call = calloc(1, sizeof(*call));
+  if (call == NULL) {
+    return nvidia_unavailable_observation(
+        reader, METRIC_ERROR_SOURCE_UNREADABLE, NVIDIA_STAGE_NONE, now);
+  }
+  call->api = nvidia_provider.api;
+  call->device = state->device;
+  call->initialized = nvidia_provider.initialized;
+  atomic_init(&call->references, 2);
+  snprintf(call->uuid, sizeof(call->uuid), "%s",
+           reader->selected_stable_id + strlen("nvidia:"));
+  snprintf(call->pci_bdf, sizeof(call->pci_bdf), "0000%s",
+           reader->selected_pci_bdf);
+
+  pthread_t worker;
+  int create_result = pthread_create(&worker, NULL, run_nvidia_call, call);
+  if (create_result != 0) {
+    free(call);
+    return nvidia_unavailable_observation(
+        reader, METRIC_ERROR_SOURCE_UNREADABLE, NVIDIA_STAGE_NONE, now);
+  }
+
+  struct timespec timeout_at;
+  if (clock_gettime(CLOCK_REALTIME, &timeout_at) != 0) {
+    pthread_detach(worker);
+    nvidia_provider_quarantined = true;
+    state->timed_out = true;
+    release_nvidia_call(call);
+    return nvidia_unavailable_observation(reader, METRIC_ERROR_SAMPLE_TIMEOUT,
+                                          NVIDIA_STAGE_NONE, now);
+  }
+  timeout_at.tv_nsec += NVIDIA_CALL_TIMEOUT_MS * 1000000L;
+  timeout_at.tv_sec += timeout_at.tv_nsec / 1000000000L;
+  timeout_at.tv_nsec %= 1000000000L;
+  int join_result = pthread_timedjoin_np(worker, NULL, &timeout_at);
+  if (join_result != 0) {
+    pthread_detach(worker);
+    nvidia_provider_quarantined = true;
+    state->timed_out = true;
+    release_nvidia_call(call);
+    return nvidia_unavailable_observation(reader, METRIC_ERROR_SAMPLE_TIMEOUT,
+                                          NVIDIA_STAGE_UTILIZATION, now);
+  }
+
+  nvidia_provider.initialized = call->initialized;
+  if (call->identity_verified)
+    state->device = call->device;
+  int64_t window_ms = elapsed_ms(state->baseline_at, now);
+  state->baseline_at = now;
+
+  if (call->stage == NVIDIA_STAGE_IDENTITY) {
+    release_nvidia_call(call);
+    return nvidia_unavailable_observation(reader, METRIC_ERROR_DEVICE_MISSING,
+                                          NVIDIA_STAGE_IDENTITY, now);
+  }
+  if (call->result != NVML_SUCCESS) {
+    MetricErrorCode code = nvidia_error_code(call->stage, call->result);
+    NvidiaCallStage stage = call->stage;
+    release_nvidia_call(call);
+    return nvidia_unavailable_observation(reader, code, stage, now);
+  }
+  if (call->percent > 100) {
+    release_nvidia_call(call);
+    return nvidia_unavailable_observation(
+        reader, METRIC_ERROR_MALFORMED_COUNTER, NVIDIA_STAGE_UTILIZATION, now);
+  }
+
+  int percent = (int)call->percent;
+  release_nvidia_call(call);
+  clear_failure(reader);
+  return available_observation(reader, percent, now, window_ms, "nvidia-nvml");
+}
+
 static void prepare_intel_fdinfo(GpuReader *reader, struct timespec now) {
   IntelReaderState *state = &reader->state.intel;
   state->path = INTEL_PATH_NONE;
@@ -1121,6 +1482,10 @@ static const GpuAdapter GPU_ADAPTERS[] = {
     {.vendor = GPU_VENDOR_AMD,
      .open = open_amd_reader,
      .observe = observe_amd_reader,
+     .close = NULL},
+    {.vendor = GPU_VENDOR_NVIDIA,
+     .open = open_nvidia_reader,
+     .observe = observe_nvidia_reader,
      .close = NULL},
 };
 

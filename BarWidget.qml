@@ -190,6 +190,7 @@ BarWidget {
     if (path === "amd-gpu-busy-percent") return "AMD gpu_busy_percent"
     if (path === "amd-fdinfo") return "AMD DRM fdinfo"
     if (path === "amd-measurement") return "AMD measurement"
+    if (path === "nvidia-nvml") return "NVIDIA NVML graphics engine"
     if (path === "gpu-selection") return "GPU selection"
     if (path === "gpu-inventory") return "GPU inventory"
     return path === "" ? "No measurement path" : path
