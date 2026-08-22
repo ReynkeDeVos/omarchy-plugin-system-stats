@@ -94,7 +94,9 @@ ShellRoot {
     if (!verify(screenB.snapshotSequence === 1, "screen B sequence")) return
     if (!verify(screenA.cpuVisible && screenB.cpuVisible, "CPU metrics visible")) return
     if (!verify(screenA.ramVisible && screenB.ramVisible, "RAM metrics visible")) return
-    if (!verify(!screenA.gpuVisible && !screenB.gpuVisible, "GPU metrics hidden")) return
+    if (!verify(screenA.gpuVisible && screenB.gpuVisible, "GPU metrics visible")) return
+    if (!verify(!screenA.gpuErrorVisible && !screenB.gpuErrorVisible,
+                "available GPU metrics have no error marker")) return
     if (!verify(screenA.displayValue === "37", "screen A CPU value")) return
     if (!verify(screenB.displayValue === "37", "screen B CPU value")) return
     if (!verify(screenA.ramDisplayFormat === "percent", "screen A default RAM format")) return
@@ -103,8 +105,18 @@ ShellRoot {
     if (!verify(screenB.ramDisplayValue === "63", "screen B RAM percentage")) return
     if (!verify(screenA.ramDisplayUnit === "%", "screen A RAM percentage unit")) return
     if (!verify(screenB.ramDisplayUnit === "%", "screen B RAM percentage unit")) return
+    if (!verify(screenA.gpuDisplayValue === "40", "screen A GPU percentage")) return
+    if (!verify(screenB.gpuDisplayValue === "40", "screen B GPU percentage")) return
+    if (!verify(screenA.gpuStatusSummary() === "40% graphics engine busy",
+                "detail panel summarizes the available value")) return
+    if (!verify(screenA.gpuMeasurementPath() === "i915 DRM fdinfo",
+                "detail panel names the measurement path")) return
+    if (!verify(screenA.gpuEvidenceSummary() === "Fixture-tested",
+                "detail panel names the evidence status")) return
     if (!verify(screenA.Accessible.name.indexOf("RAM 63 Prozent") !== -1,
                 "RAM percentage is accessible")) return
+    if (!verify(screenA.Accessible.name.indexOf("GPU 40 Prozent") !== -1,
+                "GPU percentage is accessible")) return
 
     screenAWidth = screenA.implicitWidth
     screenBWidth = screenB.implicitWidth
@@ -167,5 +179,6 @@ ShellRoot {
     if (!verify(screenA.initializing && screenB.initializing, "initialization display")) return
     if (!verify(!screenA.cpuVisible && !screenB.cpuVisible, "CPU hidden while initializing")) return
     if (!verify(!screenA.ramVisible && !screenB.ramVisible, "RAM hidden while initializing")) return
+    if (!verify(!screenA.gpuVisible && !screenB.gpuVisible, "GPU hidden while initializing")) return
   }
 }

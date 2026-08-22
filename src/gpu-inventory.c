@@ -665,6 +665,13 @@ bool gpu_inventory_selected_present(const GpuInventoryManager *manager) {
          access(selected->presence_path, F_OK) == 0;
 }
 
+const GpuDevice *
+gpu_inventory_selected_device(const GpuInventoryManager *manager) {
+  if (manager->status != GPU_SELECTION_SELECTED)
+    return NULL;
+  return find_device(&manager->inventory, manager->selected_stable_id);
+}
+
 bool gpu_inventory_retry_due(const GpuInventoryManager *manager,
                              struct timespec now) {
   return manager->retry_scheduled &&
@@ -790,7 +797,13 @@ void gpu_inventory_emit_snapshot_fields(GpuInventoryManager *manager,
   printf("%" PRId64, manager->failure_since_ms);
   if (manager->status == GPU_SELECTION_MISSING && manager->retry_scheduled)
     printf(",\"retryAt\":%" PRId64, monotonic_ms(manager->retry_at));
-  fputs("},\"selection\":{\"mode\":", stdout);
+  putchar('}');
+  gpu_inventory_emit_snapshot_state_fields(manager);
+}
+
+void gpu_inventory_emit_snapshot_state_fields(
+    const GpuInventoryManager *manager) {
+  fputs(",\"selection\":{\"mode\":", stdout);
   emit_json_string(gpu_selection_mode_name(manager->mode));
   fputs(",\"status\":", stdout);
   emit_json_string(selection_status_name(manager->status));

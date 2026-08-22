@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "gpu-inventory.h"
+#include "gpu-measurement.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -40,6 +41,12 @@ typedef struct {
   const char *drm_root;
   const char *nvidia_root;
   const char *udev_data_root;
+  const char *proc_root;
+  const char *intel_proc_frames_root;
+  const char *event_source_root;
+  const char *pci_devices_root;
+  bool fixture_system;
+  bool fixture_pmu_system;
   long interval_ms;
   long second_ms;
 } Options;
@@ -113,6 +120,10 @@ static Options parse_options(int argc, char **argv) {
   const char *drm_root = getenv("SYSTEM_STATS_DRM_ROOT");
   const char *nvidia_root = getenv("SYSTEM_STATS_NVIDIA_ROOT");
   const char *udev_data_root = getenv("SYSTEM_STATS_UDEV_DATA_ROOT");
+  const char *proc_root = getenv("SYSTEM_STATS_PROC_ROOT");
+  const char *intel_proc_frames_root = getenv("SYSTEM_STATS_INTEL_PROC_FRAMES");
+  const char *event_source_root = getenv("SYSTEM_STATS_EVENT_SOURCE_ROOT");
+  const char *pci_devices_root = getenv("SYSTEM_STATS_PCI_DEVICES_ROOT");
   const char *interval_text = getenv("SYSTEM_STATS_INTERVAL_MS");
   const char *second_text = getenv("SYSTEM_STATS_SECOND_MS");
   Options options = {
@@ -138,6 +149,26 @@ static Options parse_options(int argc, char **argv) {
       .udev_data_root = udev_data_root != NULL && *udev_data_root != '\0'
                             ? udev_data_root
                             : "/run/udev/data",
+      .proc_root =
+          proc_root != NULL && *proc_root != '\0' ? proc_root : "/proc",
+      .intel_proc_frames_root =
+          intel_proc_frames_root != NULL && *intel_proc_frames_root != '\0'
+              ? intel_proc_frames_root
+              : NULL,
+      .event_source_root =
+          event_source_root != NULL && *event_source_root != '\0'
+              ? event_source_root
+              : "/sys/bus/event_source/devices",
+      .pci_devices_root = pci_devices_root != NULL && *pci_devices_root != '\0'
+                              ? pci_devices_root
+                              : "/sys/bus/pci/devices",
+      .fixture_system = gpu_inventory_path != NULL || drm_root != NULL ||
+                        nvidia_root != NULL || udev_data_root != NULL ||
+                        proc_root != NULL || intel_proc_frames_root != NULL ||
+                        event_source_root != NULL || pci_devices_root != NULL,
+      .fixture_pmu_system =
+          event_source_root != NULL && *event_source_root != '\0' &&
+          pci_devices_root != NULL && *pci_devices_root != '\0',
       .interval_ms = 2000,
       .second_ms = 1000,
   };
@@ -706,7 +737,8 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
                           const HostObservation *observation,
                           MetricFailureState *cpu_failure,
                           MetricFailureState *ram_failure,
-                          GpuInventoryManager *gpu_inventory) {
+                          GpuInventoryManager *gpu_inventory,
+                          const GpuObservation *gpu_observation) {
   int64_t sampled_at_ms = monotonic_ms(observation->sampled_at);
   if (observation->cpu_available) {
     cpu_failure->code = NULL;
@@ -728,8 +760,10 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
          ",\"sequence\":%" PRIu64 ",\"configRevision\":%" PRIu64
          ",\"phase\":\"%s\",\"publishedAtMs\":%" PRId64 ",\"cpu\":",
          generation, sequence, config_revision,
-         observation->cpu_available && observation->ram_available ? "live"
-                                                                  : "degraded",
+         observation->cpu_available && observation->ram_available &&
+                 gpu_observation->available
+             ? "live"
+             : "degraded",
          sampled_at_ms);
   if (observation->cpu_available) {
     printf("{\"status\":\"available\",\"value\":{\"percent\":%d,"
@@ -759,7 +793,8 @@ static void emit_snapshot(uint64_t generation, uint64_t sequence,
            "\"since\":%" PRId64 "}",
            observation->ram_error, ram_failure->since_ms);
   }
-  gpu_inventory_emit_snapshot_fields(gpu_inventory, observation->sampled_at);
+  gpu_measurement_emit_snapshot_fields(gpu_observation, gpu_inventory,
+                                       observation->sampled_at);
   fputs(",\"source\":{\"status\":\"running\"}}\n", stdout);
   fflush(stdout);
 }
@@ -777,6 +812,7 @@ int main(int argc, char **argv) {
   MetricFailureState cpu_failure = {0};
   MetricFailureState ram_failure = {0};
   GpuInventoryManager gpu_inventory = {0};
+  GpuMeasurement *gpu_measurement = NULL;
   bool accepts_commands = true;
 
   GpuInventoryOptions gpu_options = {
@@ -791,6 +827,20 @@ int main(int argc, char **argv) {
   struct timespec inventory_started_at = monotonic_now();
   gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_SESSION_START,
                           inventory_started_at);
+  GpuMeasurementOptions measurement_options = {
+      .proc_root = options.proc_root,
+      .fixture_proc_frames_root = options.intel_proc_frames_root,
+      .event_source_root = options.event_source_root,
+      .pci_devices_root = options.pci_devices_root,
+      .fixture_system = options.fixture_system,
+      .fixture_pmu_system = options.fixture_pmu_system,
+  };
+  gpu_measurement = gpu_measurement_create(&measurement_options);
+  if (gpu_measurement == NULL)
+    fail("could not allocate GPU measurement state");
+  gpu_measurement_reconcile(gpu_measurement,
+                            gpu_inventory_selected_device(&gpu_inventory),
+                            inventory_started_at);
 
   emit_hello(generation, monotonic_ms(monotonic_now()));
   gpu_inventory_emit(&gpu_inventory, generation);
@@ -830,6 +880,9 @@ int main(int argc, char **argv) {
           struct timespec refreshed_at = monotonic_now();
           gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_PICKER,
                                   refreshed_at);
+          gpu_measurement_reconcile(
+              gpu_measurement, gpu_inventory_selected_device(&gpu_inventory),
+              refreshed_at);
           gpu_inventory_emit(&gpu_inventory, generation);
           emit_refresh_ack(generation, &refresh);
         }
@@ -883,6 +936,9 @@ int main(int argc, char **argv) {
         gpu_inventory_set_selection(&gpu_inventory, command.gpu_selection_mode,
                                     command.gpu_stable_id, monotonic_now());
       }
+      gpu_measurement_reconcile(gpu_measurement,
+                                gpu_inventory_selected_device(&gpu_inventory),
+                                monotonic_now());
       config_revision = command.config_revision;
       emit_configure_ack(generation, &command, &gpu_inventory);
       if (interval_changed) {
@@ -894,6 +950,9 @@ int main(int argc, char **argv) {
         emit_initializing_snapshot(generation, ++sequence, config_revision,
                                    monotonic_ms(reset_at), &gpu_inventory,
                                    reset_at);
+        gpu_measurement_reset(gpu_measurement,
+                              gpu_inventory_selected_device(&gpu_inventory),
+                              monotonic_now());
       }
       free(line);
       continue;
@@ -907,6 +966,8 @@ int main(int argc, char **argv) {
     now = monotonic_now();
     if (gpu_inventory_retry_due(&gpu_inventory, now)) {
       gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_RETRY, now);
+      gpu_measurement_reconcile(
+          gpu_measurement, gpu_inventory_selected_device(&gpu_inventory), now);
       gpu_inventory_emit(&gpu_inventory, generation);
       continue;
     }
@@ -914,10 +975,15 @@ int main(int argc, char **argv) {
     if (gpu_inventory.status == GPU_SELECTION_SELECTED &&
         !gpu_inventory_selected_present(&gpu_inventory)) {
       gpu_inventory_reconcile(&gpu_inventory, GPU_DISCOVERY_DISAPPEARANCE, now);
+      gpu_measurement_reconcile(
+          gpu_measurement, gpu_inventory_selected_device(&gpu_inventory), now);
       gpu_inventory_emit(&gpu_inventory, generation);
     }
 
     HostObservation observation = host_sampler_observe(&host_sampler, deadline);
+    GpuObservation gpu_observation = gpu_measurement_observe(
+        gpu_measurement, gpu_inventory_selected_device(&gpu_inventory),
+        observation.sampled_at);
 
     if (host_sampler_fixture_exhausted(&host_sampler)) {
       for (;;)
@@ -925,7 +991,7 @@ int main(int argc, char **argv) {
     }
 
     emit_snapshot(generation, ++sequence, config_revision, &observation,
-                  &cpu_failure, &ram_failure, &gpu_inventory);
+                  &cpu_failure, &ram_failure, &gpu_inventory, &gpu_observation);
 
     deadline = add_ms(deadline, options.interval_ms);
     if (compare_timespec(deadline, observation.sampled_at) <= 0)

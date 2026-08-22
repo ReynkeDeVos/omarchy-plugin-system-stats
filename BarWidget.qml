@@ -13,7 +13,7 @@ BarWidget {
   readonly property bool initializing: !snapshot || snapshot.phase === "initializing"
   readonly property bool cpuVisible: !initializing && snapshot.cpu.status === "available"
   readonly property bool ramVisible: !initializing && snapshot.ram.status === "available"
-  readonly property bool gpuVisible: false
+  readonly property bool gpuVisible: !initializing && snapshot.gpu.status === "available"
   readonly property string displayValue: cpuVisible ? String(snapshot.cpu.value.percent) : ""
   readonly property string ramDisplayFormat: String(setting("ramDisplayFormat", "percent")) === "gib"
     ? "gib" : "percent"
@@ -24,7 +24,11 @@ BarWidget {
     : (ramDisplayFormat === "gib" ? ramGiBValue : String(snapshot.ram.value.percent))
   readonly property string ramDisplayUnit: ramDisplayFormat === "gib" ? " GiB" : "%"
   readonly property bool warningVisible: !initializing && !cpuVisible && !ramVisible && !gpuVisible
+  readonly property bool gpuErrorVisible: !initializing && !gpuVisible && !warningVisible
+  readonly property string gpuDisplayValue: gpuVisible ? String(snapshot.gpu.value.percent)
+    : (gpuErrorVisible ? "!" : "")
   readonly property color metricColor: bar ? bar.barForeground : Color.foreground
+  readonly property color gpuColor: gpuErrorVisible ? Color.urgent : metricColor
   readonly property bool opened: popupOpen
   readonly property var gpuInventory: session ? session.gpuInventory : ({ revision: 0, devices: [] })
   readonly property var gpuOptions: buildGpuOptions()
@@ -138,6 +142,54 @@ BarWidget {
     return selectedGpuDevice ? selectedGpuDevice.label : snapshot.selection.stableId
   }
 
+  function gpuStatusSummary() {
+    if (!snapshot || !snapshot.gpu) return "Waiting for the first GPU sample…"
+    if (snapshot.gpu.status === "available")
+      return snapshot.gpu.value.percent + "% graphics engine busy"
+    var code = snapshot.gpu.error ? snapshot.gpu.error.code : ""
+    if (code === "permissionDenied")
+      return "GPU counters are not readable with the current permissions."
+    if (code === "insufficientVisibility")
+      return "Some processes are hidden, so a reliable system-wide value is unavailable."
+    if (code === "unsupportedDevice" && snapshot.gpu.error
+        && String(snapshot.gpu.error.pathId || "").indexOf("intel-") === 0)
+      return "This Intel driver exposes an unknown measurement ABI."
+    if (code === "deviceMissing")
+      return "The selected GPU is no longer present."
+    if (code === "counterReset")
+      return "GPU counters reset; the next complete sample will retry."
+    if (code === "noTrueEnginePath")
+      return "No true graphics-engine measurement path is available."
+    if (code === "stale")
+      return "The last GPU sample is no longer current."
+    if (code === "selectionRequired")
+      return "Choose a GPU before usage can be measured."
+    return snapshot.gpu.error && snapshot.gpu.error.diagnostic
+      ? snapshot.gpu.error.diagnostic : "GPU usage is unavailable."
+  }
+
+  function gpuMeasurementPath() {
+    if (!snapshot || !snapshot.gpu) return "Not selected"
+    var rawPath = snapshot.gpu.status === "available"
+      ? snapshot.gpu.path
+      : (snapshot.gpu.error ? snapshot.gpu.error.pathId : "")
+    var path = rawPath === undefined || rawPath === null ? "" : String(rawPath)
+    if (path === "intel-i915-pmu") return "i915 PMU engine time"
+    if (path === "intel-i915-fdinfo") return "i915 DRM fdinfo"
+    if (path === "intel-xe-fdinfo") return "Xe DRM cycle counters"
+    if (path === "intel-fdinfo") return "Intel DRM fdinfo"
+    if (path === "gpu-selection") return "GPU selection"
+    if (path === "gpu-inventory") return "GPU inventory"
+    return path === "" ? "No measurement path" : path
+  }
+
+  function gpuEvidenceSummary() {
+    if (!snapshot || !snapshot.gpu) return "Not measured"
+    var evidence = snapshot.gpu.evidence
+    return evidence === "hardwareConfirmed" ? "Hardware-confirmed"
+      : (evidence === "fixtureTested" ? "Fixture-tested" : "Not measured")
+  }
+
   function selectGpu(value) {
     if (!session) return
     value = String(value)
@@ -189,6 +241,8 @@ BarWidget {
         ? "RAM " + ramGiBValue + " GiB"
         : "RAM " + ramDisplayValue + " Prozent")
     }
+    if (gpuVisible) metrics.push("GPU " + gpuDisplayValue + " Prozent")
+    else if (gpuErrorVisible) metrics.push("GPU Messwert nicht verfügbar")
     return metrics.length > 0
       ? "System Stats, " + metrics.join(", ")
       : "System Stats, Messwerte nicht verfügbar"
@@ -206,6 +260,8 @@ BarWidget {
     cpuIcon.requestPaint()
     ramIcon.requestPaint()
   }
+
+  onGpuColorChanged: gpuIcon.requestPaint()
 
   Row {
     id: content
@@ -376,6 +432,81 @@ BarWidget {
       }
     }
 
+    Row {
+      visible: root.gpuVisible || root.gpuErrorVisible
+      spacing: Style.space(2)
+
+      Canvas {
+        id: gpuIcon
+
+        anchors.verticalCenter: parent.verticalCenter
+        width: Style.space(12)
+        height: width
+
+        onPaint: {
+          var context = getContext("2d")
+          var scale = width / 16
+          context.reset()
+          context.strokeStyle = root.gpuColor
+          context.lineWidth = Math.max(1, 1.45 * scale)
+          context.lineCap = "round"
+          context.lineJoin = "round"
+          context.strokeRect(2 * scale, 4 * scale, 11 * scale, 8 * scale)
+          context.strokeRect(4.5 * scale, 6 * scale, 4 * scale, 4 * scale)
+          context.beginPath()
+          context.moveTo(13 * scale, 6 * scale)
+          context.lineTo(15 * scale, 6 * scale)
+          context.moveTo(13 * scale, 9 * scale)
+          context.lineTo(15 * scale, 9 * scale)
+          context.moveTo(5 * scale, 12 * scale)
+          context.lineTo(5 * scale, 14 * scale)
+          context.moveTo(9 * scale, 12 * scale)
+          context.lineTo(9 * scale, 14 * scale)
+          context.stroke()
+        }
+
+        onWidthChanged: requestPaint()
+        onHeightChanged: requestPaint()
+        onVisibleChanged: if (visible) requestPaint()
+      }
+
+      Item {
+        anchors.verticalCenter: parent.verticalCenter
+        width: gpuDigitMetrics.advanceWidth
+        height: gpuValueText.implicitHeight
+
+        Text {
+          id: gpuValueText
+
+          anchors.fill: parent
+          text: root.gpuDisplayValue
+          color: root.gpuColor
+          font.family: root.bar ? root.bar.fontFamily : Style.font.family
+          font.pixelSize: Style.font.body
+          font.features: { "tnum": 1 }
+          horizontalAlignment: Text.AlignRight
+          verticalAlignment: Text.AlignVCenter
+          renderType: Text.NativeRendering
+        }
+
+        TextMetrics {
+          id: gpuDigitMetrics
+          font: gpuValueText.font
+          text: "100"
+        }
+      }
+
+      Text {
+        visible: root.gpuVisible
+        anchors.verticalCenter: parent.verticalCenter
+        text: "%"
+        color: root.gpuColor
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.body
+        renderType: Text.NativeRendering
+      }
+    }
+
     Text {
       visible: root.warningVisible
       text: "!"
@@ -426,6 +557,42 @@ BarWidget {
         font.family: root.bar ? root.bar.fontFamily : Style.font.family
         font.pixelSize: Style.font.bodySmall
         wrapMode: Text.Wrap
+      }
+
+      Text {
+        width: parent.width
+        text: "GPU usage"
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        font.bold: true
+      }
+
+      Text {
+        width: parent.width
+        text: root.gpuStatusSummary()
+        color: root.snapshot && root.snapshot.gpu.status === "unavailable"
+          ? Color.urgent : (root.bar ? root.bar.foreground : Color.foreground)
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.Wrap
+      }
+
+      Text {
+        width: parent.width
+        text: "Measurement · " + root.gpuMeasurementPath()
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        text: "Evidence · " + root.gpuEvidenceSummary()
+        color: root.bar ? root.bar.foreground : Color.foreground
+        font.family: root.bar ? root.bar.fontFamily : Style.font.family
+        font.pixelSize: Style.font.caption
       }
 
       Text {

@@ -89,7 +89,8 @@ ShellRoot {
     if (!verify(snapshot.selection.stableId === intelId, "single stable identity selected")) return
     if (!verify(snapshot.gpu.error.code === "noTrueEnginePath", "missing measurement is explicit")) return
     if (!verify(snapshot.gpu.error.stableId === intelId, "GPU error names selected identity")) return
-    if (!verify(snapshot.gpu.error.pathId === "gpu-measurement", "GPU error has stable path")) return
+    if (!verify(snapshot.gpu.error.pathId === "intel-measurement",
+                "selected Intel GPU identifies its measurement path")) return
     if (!verify(snapshot.gpu.error.diagnostic.length > 0, "GPU error has diagnostic")) return
     if (!verify(Object.isFrozen(session.gpuInventory), "inventory immutability")) return
     if (!verify(Object.isFrozen(session.gpuInventory.devices), "device list immutability")) return

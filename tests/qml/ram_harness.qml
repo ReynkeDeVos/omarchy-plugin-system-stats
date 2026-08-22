@@ -30,9 +30,8 @@ ShellRoot {
   function checkSnapshot(snapshot) {
     if (finished || snapshot.sequence !== 1) return
 
-    var expectedPhase = expectedCpuStatus === "available"
-      && expectedRamStatus === "available" ? "live" : "degraded"
-    if (!verify(snapshot.phase === expectedPhase, caseName + " snapshot phase")) return
+    if (!verify(snapshot.phase === "degraded",
+                caseName + " unavailable GPU keeps the snapshot degraded")) return
     if (!verify(snapshot.cpu.status === expectedCpuStatus, caseName + " CPU status")) return
     if (expectedCpuStatus === "available"
         && !verify(snapshot.cpu.value.percent === expectedCpuPercent,

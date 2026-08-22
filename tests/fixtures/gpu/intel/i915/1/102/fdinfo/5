@@ -1,0 +1,5 @@
+pos:	0
+drm-driver:	i915
+drm-client-id:	9
+drm-pdev:	0000:01:00.0
+drm-engine-render:	100000000 ns
