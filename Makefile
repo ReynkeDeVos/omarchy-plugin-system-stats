@@ -20,6 +20,7 @@ check:
 
 validate:
 	bash tests/test_manifest.sh
+	bash tests/test_quattro.sh
 
 test: build check validate
 	bash tests/test_helper.sh
