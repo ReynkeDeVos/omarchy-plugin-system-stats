@@ -6,6 +6,7 @@ import Quickshell.Io
 Item {
   id: root
 
+  property var shell: null
   readonly property var current: _current
   readonly property var gpuInventory: _gpuInventory
 
@@ -125,6 +126,25 @@ Item {
     _pendingGpuInventoryRefreshes[commandId] = command
     if (collector.running && _generation > 0) _sendGpuInventoryRefresh(command)
     return commandId
+  }
+
+  function acceptanceState() {
+    var bar = shell ? shell.bar : null
+    var widgets = bar && typeof bar.moduleWidgets === "function"
+      ? bar.moduleWidgets("reynkedevos.system-stats") : []
+    if (widgets.length > 0 && typeof widgets[0].acceptanceState === "function")
+      return widgets[0].acceptanceState()
+    return JSON.stringify({
+      schemaVersion: 1,
+      widgetCount: 0,
+      serviceCount: 0,
+      snapshotCount: 0,
+      generation: -1,
+      sequence: -1,
+      sharedSequence: false,
+      sharedSettings: false,
+      widgets: []
+    })
   }
 
   function _validStableGpuId(stableId) {
@@ -961,6 +981,13 @@ Item {
       && /^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$/.test(device.pciBdf)
       && ["yes", "no", "unknown"].indexOf(device.displayRelation) >= 0
       && typeof device.selectable === "boolean"
+  }
+
+  IpcHandler {
+    enabled: root.shell !== null
+    target: "reynkedevos.system-stats"
+
+    function acceptanceState(): string { return root.acceptanceState() }
   }
 
   Process {

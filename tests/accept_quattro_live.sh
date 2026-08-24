@@ -10,9 +10,11 @@ Run the System Stats acceptance gate in the active two-or-more-screen Omarchy
 session. The gate installs only a temporary Git copy, refuses to replace an
 existing installation, and restores the original shell configuration on exit.
 
-  --real-suspend  Prompt for one short and one 30-second system suspend. Without
-                  this flag, reversible process pauses exercise resume handling
-                  without changing workstation power state.
+Without an option, the script is a non-power-state-changing preflight. It uses
+reversible process pauses but does not satisfy the real-suspend release gate.
+
+  --real-suspend  Prompt for one short and one 30-second system suspend and run
+                  the complete Quattro lifecycle acceptance.
 USAGE
 }
 
@@ -131,6 +133,21 @@ entry_state() {
   ' <<<"$config"
 }
 
+acceptance_state() {
+  omarchy-shell "$plugin_id" acceptanceState 2>/dev/null || printf '{}'
+}
+
+shared_live_state_matches() {
+  local state=$1
+  jq -e --argjson widgetCount "$monitor_count" '
+    .widgetCount == $widgetCount
+    and .serviceCount == 1
+    and .snapshotCount == 1
+    and .sharedSequence == true
+    and .sharedSettings == true
+  ' <<<"$state" >/dev/null
+}
+
 wait_for_shell() {
   local attempt
   for ((attempt = 0; attempt < 200; attempt++)); do
@@ -142,19 +159,21 @@ wait_for_shell() {
 
 wait_for_live() {
   local expected_section=$1
-  local attempt widgets entries
+  local attempt widgets entries state
   for ((attempt = 0; attempt < 200; attempt++)); do
     collect_helper_pids
     widgets=$(widget_count)
     entries=$(entry_state)
+    state=$(acceptance_state)
     if [[ ${#helper_pids[@]} -eq 1 && $widgets -eq $monitor_count ]] \
         && [[ $(jq 'length' <<<"$entries") -eq 1 ]] \
-        && [[ $(jq -r '.[0].section' <<<"$entries") == "$expected_section" ]]; then
+        && [[ $(jq -r '.[0].section' <<<"$entries") == "$expected_section" ]] \
+        && shared_live_state_matches "$state"; then
       return 0
     fi
     sleep 0.05
   done
-  fail "expected one service helper and $monitor_count widgets in $expected_section"
+  fail "expected one service, one snapshot, one helper, and $monitor_count widgets in $expected_section"
 }
 
 wait_for_unloaded() {
@@ -181,30 +200,72 @@ assert_helper_shape() {
   [[ -z $children ]] || fail "the helper launched a child process"
 }
 
-assert_persisted_settings() {
-  local entries
-  entries=$(entry_state)
+persisted_settings_match() {
+  local entries=$1
   jq -e '
     length == 1
     and .[0].intervalSeconds == 3
     and .[0].ramDisplayFormat == "gib"
-  ' <<<"$entries" >/dev/null || fail "the inline settings changed or split"
+  ' <<<"$entries" >/dev/null
+}
+
+live_widget_settings_match() {
+  local state=$1
+  jq -e '
+    .sharedSettings == true
+    and ([.widgets[]
+      | .settings.intervalSeconds == 3
+        and .settings.ramDisplayFormat == "gib"] | all)
+  ' <<<"$state" >/dev/null
+}
+
+assert_persisted_settings() {
+  local entries state
+  entries=$(entry_state)
+  state=$(acceptance_state)
+  persisted_settings_match "$entries" && live_widget_settings_match "$state" ||
+    fail "the inline or per-screen settings changed or split"
 }
 
 wait_for_persisted_settings() {
-  local attempt entries
+  local attempt entries state
   for ((attempt = 0; attempt < 100; attempt++)); do
     entries=$(entry_state)
-    if jq -e '
-      length == 1
-      and .[0].intervalSeconds == 3
-      and .[0].ramDisplayFormat == "gib"
-    ' <<<"$entries" >/dev/null; then
+    state=$(acceptance_state)
+    if persisted_settings_match "$entries" && live_widget_settings_match "$state"; then
       return 0
     fi
     sleep 0.05
   done
-  fail "the inline settings were not persisted"
+  fail "the inline settings were not persisted: entries=$(entry_state) widgets=$(acceptance_state)"
+}
+
+wait_for_shared_sequence_progress() {
+  local initial_state initial_generation initial_sequence attempt state
+  initial_state=$(acceptance_state)
+  shared_live_state_matches "$initial_state" || fail "the live widget state is not shared"
+  initial_generation=$(jq '.generation' <<<"$initial_state")
+  initial_sequence=$(jq '.sequence' <<<"$initial_state")
+
+  for ((attempt = 0; attempt < 240; attempt++)); do
+    state=$(acceptance_state)
+    if shared_live_state_matches "$state" \
+        && live_widget_settings_match "$state" \
+        && [[ $(jq '.generation' <<<"$state") -eq $initial_generation ]] \
+        && [[ $(jq '.sequence' <<<"$state") -gt $initial_sequence ]]; then
+      return 0
+    fi
+    sleep 0.05
+  done
+  fail "the real screen widgets did not advance through one shared sequence"
+}
+
+verify_resumed_runtime() {
+  wait_for_shell
+  wait_for_live right
+  wait_for_persisted_settings
+  assert_helper_shape
+  assert_persisted_settings
 }
 
 pause_runtime() {
@@ -219,10 +280,7 @@ pause_runtime() {
   kill -STOP "$helper_pid" "$shell_pid"
   sleep "$seconds"
   kill -CONT "$helper_pid" "$shell_pid"
-  wait_for_shell
-  wait_for_live right
-  assert_helper_shape
-  assert_persisted_settings
+  verify_resumed_runtime
   printf 'PASS: %s process pause leaves one helper\n' "$label"
 }
 
@@ -240,17 +298,13 @@ real_suspend_cycle() {
   elapsed=$((resumed_at - started_at))
   (( elapsed >= minimum_seconds )) ||
     fail "$label lasted ${elapsed}s; expected at least ${minimum_seconds}s"
-  wait_for_shell
-  wait_for_live right
-  assert_helper_shape
-  assert_persisted_settings
+  verify_resumed_runtime
   printf 'PASS: %s system suspend leaves one helper\n' "$label"
 }
 
-# The entry-point integration harness proves that two independent screen callers
-# observe the same immutable sequence and settings through the public service.
+# Exercise both shipped entry points before installing the temporary live copy.
 bash "$repo_root/tests/test_widget.sh" >/dev/null
-printf 'PASS: two screen callers share one sequence and settings contract\n'
+printf 'PASS: two-screen entry-point integration contract\n'
 
 owns_plugin=true
 omarchy plugin add "file://$stage_repo" --enable --yes
@@ -263,7 +317,8 @@ omarchy bar set "$plugin_id" intervalSeconds 3 --json >/dev/null
 omarchy bar set "$plugin_id" ramDisplayFormat gib >/dev/null
 wait_for_persisted_settings
 assert_persisted_settings
-printf 'PASS: all screen widgets retain one inline settings record\n'
+wait_for_shared_sequence_progress
+printf 'PASS: real screen widgets advance one shared sequence and settings record\n'
 
 old_helper=${helper_pids[0]}
 touch "$plugin_dir/Service.qml"
@@ -281,6 +336,7 @@ done
 [[ -n $new_helper ]] || fail "plugin reload did not replace the helper"
 (( max_helpers <= 1 )) || fail "plugin reload overlapped $max_helpers helpers"
 wait_for_live right
+wait_for_persisted_settings
 assert_persisted_settings
 printf 'PASS: plugin reload peaks at one helper\n'
 
@@ -320,5 +376,11 @@ wait_for_unloaded
 [[ ! -e $plugin_dir ]] || fail "plugin removal left its checkout behind"
 printf 'PASS: removal leaves no checkout, widget, or helper\n'
 
-printf 'PASS: Quattro %s live acceptance on %s screens\n' \
-  "$target_omarchy_version" "$monitor_count"
+if [[ $real_suspend == true ]]; then
+  printf 'PASS: Quattro %s full live acceptance on %s screens\n' \
+    "$target_omarchy_version" "$monitor_count"
+else
+  printf 'PASS: Quattro %s live preflight on %s screens\n' \
+    "$target_omarchy_version" "$monitor_count"
+  printf 'INCOMPLETE: run again with --real-suspend for release acceptance\n'
+fi

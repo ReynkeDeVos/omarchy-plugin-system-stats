@@ -25,8 +25,8 @@ omarchy plugin enable reynkedevos.system-stats --section right
 ```
 
 Running `omarchy plugin enable reynkedevos.system-stats` without a section uses
-the manifest's safe right-section default. The interactive `omarchy plugin add
-… --enable` flow offers the same three sections and preselects right.
+the initial bar placement in the right section. The interactive `omarchy plugin
+add … --enable` flow offers the same three sections and preselects right.
 
 After activation, drag the widget normally or use Omarchy's bar command to move
 it between the three bar sections:
@@ -78,8 +78,9 @@ make test
 ```
 
 Before publishing for a Quattro target, also run the live two-screen gate from
-the [compatibility notes](docs/quattro-compatibility.md). Real system suspend is
-an explicit opt-in step in that gate.
+the [compatibility notes](docs/quattro-compatibility.md). The required real
+system-suspend step has an explicit flag because it changes workstation power
+state.
 
 Tests exercise CPU, RAM, GPU selection, and vendor GPU measurement through the public `SystemStatsSession` interface exposed by `Service.qml`. Fixture reads shorten the interval but use the same helper and parsing path as production. Intel PMU, i915 `fdinfo`, and Xe `fdinfo` fixtures cover engine-event completeness, RC6 exclusion, PCI filtering, shared-client deduplication, engine capacity, reset handling, recovery, and visibility or ABI failures. AMD fixtures cover APUs, discrete and multiple GPUs, exact-BDF sysfs reads, fdinfo fallback, suspend and read errors, invalid values, device loss, and exclusion of memory or temperature data. Inventory fixtures cover integrated, discrete, hybrid, and mixed-display layouts; production-style udev naming; hotplug; cross-vendor fixed-device retries; helper restarts; and restoration across sessions. The integration matrix also proves that measurement errors do not trigger reselection, a moving Nvidia UUID rebinds to its refreshed PCI identity, and unselected vendor paths do no sample work. Scripted process tests cover malformed protocol traffic, stale values, crashes, hangs, and backoff without waiting real minutes. The widget smoke tests verify CPU, RAM, and GPU display; RAM formats; stable reserved width; picker persistence; and two callers sharing one single-threaded helper and scheduler.
 

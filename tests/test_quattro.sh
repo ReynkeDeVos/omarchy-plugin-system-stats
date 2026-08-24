@@ -24,6 +24,8 @@ grep -Fq 'Validated target: **Omarchy 4.0.0-1**' "$compatibility_doc"
 grep -Fq 'Quickshell 0.3.0 (revision 28771c7c74b42e20afca0b1b63980cb46515537c)' \
   "$compatibility_doc"
 grep -Fq '## Limits on other versions' "$compatibility_doc"
+grep -Fq 'bash tests/accept_quattro_live.sh --real-suspend' "$compatibility_doc"
+grep -Fq "does not replace ADR-0001's separate" "$compatibility_doc"
 
 live_help=$(bash "$repo_root/tests/accept_quattro_live.sh" --help)
 grep -Fq 'Usage: tests/accept_quattro_live.sh [--real-suspend]' <<<"$live_help"

@@ -4,31 +4,39 @@ Validated target: **Omarchy 4.0.0-1**, using manifest schema 1 and
 Quickshell 0.3.0 (revision 28771c7c74b42e20afca0b1b63980cb46515537c).
 The packaged helper target is x86-64 Linux.
 
-This is the release boundary for System Stats 0.4.0. On this target, the
-official `omarchy plugin validate` command accepts the combined `service` and
-`bar-widget` manifest and both QML entry points. Omarchy creates one service in
-the long-running shell and one bar-widget instance per screen. Every widget
-reads the service through `shell.serviceFor("reynkedevos.system-stats")`, while
-its persisted settings come from the one inline bar-layout entry in
-`~/.config/omarchy/shell.json`.
+This is the validated Quattro compatibility target for System Stats 0.4.0. On
+this target, the official `omarchy plugin validate` command accepts the combined
+`service` and `bar-widget` manifest and both QML entry points. Omarchy creates
+one service in the long-running shell and one bar-widget instance per screen.
+The live gate queries the widgets through Quickshell IPC to confirm that they
+reference one service object, one immutable Abtastergebnis, one advancing
+sequence, and the same inline settings from `~/.config/omarchy/shell.json`.
 
-The release gate is split into two commands:
+The CI-safe validation and the non-power-state-changing live preflight are:
 
 ```bash
 make validate
 bash tests/accept_quattro_live.sh
 ```
 
-The first command is safe for CI and runs the official validator. The live gate
-uses the running Omarchy shell and its real screen list. It snapshots the shell
-configuration, installs a temporary Git copy, checks placement and shared
-lifecycle behavior, then removes the copy and restores the snapshot. It refuses
-to replace an existing System Stats installation.
+Full Quattro acceptance requires the real suspend mode:
 
-Real system suspend is deliberately opt-in because it changes workstation power
-state. Run `bash tests/accept_quattro_live.sh --real-suspend` and follow its two
-prompts to add a short and a long suspend/resume cycle to the same helper-count
-gate.
+```bash
+bash tests/accept_quattro_live.sh --real-suspend
+```
+
+The live gate uses the running Omarchy shell and its real screen list. It
+snapshots the shell configuration, installs a temporary Git copy, checks
+placement and shared lifecycle behavior, then removes the copy and restores the
+snapshot. It refuses to replace an existing System Stats installation. Real
+system suspend is required for acceptance but uses an explicit flag because it
+changes workstation power state; the mode prompts for one short and one long
+suspend/resume cycle.
+
+This Quattro gate covers issue #11 only. It does not replace ADR-0001's separate
+release requirements: every vendor success path still needs confirmation on
+suitable hardware, and the complete two-screen Ressourcenbudget must be
+measured before release.
 
 Installation and normal operation do not run install hooks, package managers,
 `sudo`, `pkexec`, permission or group changes, `setcap`, `sysctl`, or kernel
