@@ -30,6 +30,7 @@ test: build check validate
 	bash tests/test_intel_gpu.sh
 	bash tests/test_amd_gpu.sh
 	bash tests/test_nvidia_gpu.sh
+	bash tests/test_gpu_integration.sh
 	bash tests/test_gpu_persistence.sh
 	bash tests/test_freshness.sh
 	bash tests/test_protocol.sh

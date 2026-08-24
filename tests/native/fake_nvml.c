@@ -40,7 +40,19 @@ static const char *fixture_case(void) {
   return value == NULL ? "valid" : value;
 }
 
+static void log_api_call(const char *name) {
+  const char *path = getenv("SYSTEM_STATS_NVML_API_LOG");
+  if (path == NULL)
+    return;
+  FILE *stream = fopen(path, "ae");
+  if (stream == NULL)
+    return;
+  fprintf(stream, "%s\n", name);
+  fclose(stream);
+}
+
 int nvmlInit_v2(void) {
+  log_api_call("init");
   return strcmp(fixture_case(), "driver-missing") == 0
              ? NVML_ERROR_DRIVER_NOT_LOADED
              : NVML_SUCCESS;
@@ -70,6 +82,7 @@ int nvmlDeviceGetHandleByIndex_v2(unsigned int index, void **device) {
 }
 
 int nvmlDeviceGetHandleByUUID(const char *uuid, void **device) {
+  log_api_call("uuid lookup");
   if (strcmp(fixture_case(), "device-missing") == 0)
     return NVML_ERROR_NOT_FOUND;
   if (uuid == NULL || device == NULL)
@@ -84,8 +97,14 @@ int nvmlDeviceGetHandleByUUID(const char *uuid, void **device) {
 }
 
 int nvmlDeviceGetHandleByPciBusId_v2(const char *pci_bdf, void **device) {
+  log_api_call("PCI lookup");
   if (pci_bdf == NULL || device == NULL)
     return NVML_ERROR_INVALID_ARGUMENT;
+  if (strcmp(fixture_case(), "relocated") == 0 &&
+      strcmp(pci_bdf, devices[0].pci_bdf) == 0) {
+    *device = &devices[1];
+    return NVML_SUCCESS;
+  }
   for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
     if (strcmp(devices[i].pci_bdf, pci_bdf) == 0) {
       *device = &devices[i];
@@ -96,6 +115,7 @@ int nvmlDeviceGetHandleByPciBusId_v2(const char *pci_bdf, void **device) {
 }
 
 int nvmlDeviceGetUUID(void *device, char *uuid, unsigned int length) {
+  log_api_call("UUID verification");
   if (device == NULL || uuid == NULL)
     return NVML_ERROR_INVALID_ARGUMENT;
   FakeDevice *selected = device;
@@ -109,6 +129,7 @@ int nvmlDeviceGetUUID(void *device, char *uuid, unsigned int length) {
 }
 
 int nvmlDeviceGetUtilizationRates(void *device, NvmlUtilization *utilization) {
+  log_api_call("utilization");
   if (device == NULL || utilization == NULL)
     return NVML_ERROR_INVALID_ARGUMENT;
   const char *call_log_path = getenv("SYSTEM_STATS_NVML_CALL_LOG");

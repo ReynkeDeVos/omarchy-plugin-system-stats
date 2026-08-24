@@ -1257,8 +1257,10 @@ finished:
 
 static MetricErrorCode nvidia_error_code(NvidiaCallStage stage,
                                          NvmlReturn result) {
-  if (stage == NVIDIA_STAGE_IDENTITY || result == NVML_ERROR_NOT_FOUND ||
-      result == NVML_ERROR_GPU_NOT_FOUND || result == NVML_ERROR_GPU_IS_LOST ||
+  if (stage == NVIDIA_STAGE_IDENTITY)
+    return METRIC_ERROR_SOURCE_UNREADABLE;
+  if (result == NVML_ERROR_NOT_FOUND || result == NVML_ERROR_GPU_NOT_FOUND ||
+      result == NVML_ERROR_GPU_IS_LOST ||
       result == NVML_ERROR_INSUFFICIENT_POWER ||
       result == NVML_ERROR_IRQ_ISSUE || result == NVML_ERROR_RESET_REQUIRED) {
     return METRIC_ERROR_DEVICE_MISSING;
@@ -1306,6 +1308,12 @@ static const char *nvidia_diagnostic(MetricErrorCode code,
            "including MIG mode";
   case METRIC_ERROR_MALFORMED_COUNTER:
     return "NVML returned a graphics utilization percentage outside 0 to 100";
+  case METRIC_ERROR_SOURCE_UNREADABLE:
+    return stage == NVIDIA_STAGE_IDENTITY
+               ? "the selected Nvidia UUID does not match its expected PCI "
+                 "device"
+               : "NVML could not read graphics utilization for the selected "
+                 "Nvidia device";
   default:
     return "NVML could not read graphics utilization for the selected Nvidia "
            "device";
@@ -1386,8 +1394,9 @@ static GpuObservation observe_nvidia_reader(GpuReader *reader,
 
   if (call->stage == NVIDIA_STAGE_IDENTITY) {
     release_nvidia_call(call);
-    return nvidia_unavailable_observation(reader, METRIC_ERROR_DEVICE_MISSING,
-                                          NVIDIA_STAGE_IDENTITY, now);
+    return nvidia_unavailable_observation(
+        reader, nvidia_error_code(NVIDIA_STAGE_IDENTITY, NVML_SUCCESS),
+        NVIDIA_STAGE_IDENTITY, now);
   }
   if (call->result != NVML_SUCCESS) {
     MetricErrorCode code = nvidia_error_code(call->stage, call->result);
@@ -1522,7 +1531,12 @@ void gpu_measurement_reconcile(GpuMeasurement *measurement,
                                const GpuDevice *selected, struct timespec now) {
   GpuReader *reader = &measurement->reader;
   const char *stable_id = selected == NULL ? "" : selected->stable_id;
-  if (strcmp(reader->selected_stable_id, stable_id) == 0)
+  const char *pci_bdf = selected == NULL ? "" : selected->pci_bdf;
+  const GpuAdapter *adapter =
+      selected == NULL ? NULL : find_adapter(selected->vendor);
+  if (strcmp(reader->selected_stable_id, stable_id) == 0 &&
+      strcmp(reader->selected_pci_bdf, pci_bdf) == 0 &&
+      reader->adapter == adapter)
     return;
 
   close_reader(reader);
@@ -1530,10 +1544,10 @@ void gpu_measurement_reconcile(GpuMeasurement *measurement,
   snprintf(reader->selected_stable_id, sizeof(reader->selected_stable_id), "%s",
            stable_id);
   snprintf(reader->selected_pci_bdf, sizeof(reader->selected_pci_bdf), "%s",
-           selected == NULL ? "" : selected->pci_bdf);
+           pci_bdf);
   if (selected == NULL)
     return;
-  reader->adapter = find_adapter(selected->vendor);
+  reader->adapter = adapter;
   if (reader->adapter != NULL)
     reader->adapter->open(reader, now);
 }
@@ -1874,6 +1888,20 @@ GpuObservation gpu_measurement_observe(GpuMeasurement *measurement,
   GpuReader *reader = &measurement->reader;
   if (reader->adapter == NULL)
     return (GpuObservation){0};
+
+  const char *sample_log_path = getenv("SYSTEM_STATS_GPU_SAMPLE_LOG");
+  if (reader->options->fixture_system && sample_log_path != NULL &&
+      sample_log_path[0] != '\0') {
+    FILE *sample_log = fopen(sample_log_path, "ae");
+    if (sample_log != NULL) {
+      const char *vendor = reader->adapter->vendor == GPU_VENDOR_INTEL ? "intel"
+                           : reader->adapter->vendor == GPU_VENDOR_AMD
+                               ? "amd"
+                               : "nvidia";
+      fprintf(sample_log, "%s\t%s\n", vendor, reader->selected_stable_id);
+      fclose(sample_log);
+    }
+  }
   return reader->adapter->observe(reader, now);
 }
 

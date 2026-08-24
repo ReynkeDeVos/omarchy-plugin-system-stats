@@ -21,6 +21,7 @@
     "category": "System",
     "allowMultiple": false,
     "defaults": {
+      "intervalSeconds": 2,
       "ramDisplayFormat": "percent",
       "gpuSelection": {
         "mode": "auto",
@@ -28,6 +29,16 @@
       }
     },
     "schema": [
+      {
+        "key": "intervalSeconds",
+        "type": "integer",
+        "label": "Sampling interval",
+        "description": "Measure every two to ten whole seconds.",
+        "min": 2,
+        "max": 10,
+        "step": 1,
+        "defaultValue": 2
+      },
       {
         "key": "ramDisplayFormat",
         "type": "enum",

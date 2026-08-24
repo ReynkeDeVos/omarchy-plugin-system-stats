@@ -33,7 +33,7 @@ ShellRoot {
                 "detail panel names the AMD measurement path")) return
     if (!verify(widget.gpuEvidenceSummary() === "Fixture-tested",
                 "detail panel names the fixture evidence")) return
-    if (!verify(widget.Accessible.name.indexOf("GPU 73 Prozent") !== -1,
+    if (!verify(widget.Accessible.name.indexOf("GPU 73 percent") !== -1,
                 "AMD usage is included in the accessible bar name")) return
     widget.open()
     if (!verify(widget.opened, "detail panel opens for the AMD value")) return

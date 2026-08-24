@@ -14,12 +14,21 @@ jq -e '
   and .entryPoints.service == "Service.qml"
   and .entryPoints.barWidget == "BarWidget.qml"
   and .barWidget.defaults.ramDisplayFormat == "percent"
+  and .barWidget.defaults.intervalSeconds == 2
   and .barWidget.defaults.gpuSelection == {"mode":"auto", "configRevision":0}
   and (.barWidget.schema | any(
     .key == "ramDisplayFormat"
     and .type == "enum"
     and .options == ["percent", "gib"]
     and .defaultValue == "percent"
+  ))
+  and (.barWidget.schema | any(
+    .key == "intervalSeconds"
+    and .type == "integer"
+    and .min == 2
+    and .max == 10
+    and .step == 1
+    and .defaultValue == 2
   ))
 ' "$repo_root/manifest.json" >/dev/null
 

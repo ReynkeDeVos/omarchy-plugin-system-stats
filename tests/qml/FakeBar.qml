@@ -6,13 +6,22 @@ QtObject {
   required property var session
   property int persistenceCount: 0
   property var persistedGpuSelection: null
+  property var persistedSettings: ({})
+  property int runCount: 0
+  property string lastCommand: ""
+  property bool runResult: true
   readonly property QtObject shell: QtObject {
     readonly property QtObject pluginRegistry: QtObject {
       function setBarWidget(pluginId, key, value, selector) {
-        if (pluginId !== "reynkedevos.system-stats" || key !== "gpuSelection")
+        if (pluginId !== "reynkedevos.system-stats"
+            || (key !== "gpuSelection" && key !== "intervalSeconds"
+                && key !== "ramDisplayFormat"))
           return "unexpected setting"
         root.persistenceCount++
-        root.persistedGpuSelection = value
+        var next = Object.assign({}, root.persistedSettings)
+        next[key] = value
+        root.persistedSettings = next
+        if (key === "gpuSelection") root.persistedGpuSelection = value
         return ""
       }
     }
@@ -23,6 +32,7 @@ QtObject {
   }
 
   property bool vertical: false
+  property string position: "top"
   property int barSize: 26
   property string fontFamily: "JetBrainsMono Nerd Font"
   property color barForeground: "#dbe2ef"
@@ -32,6 +42,11 @@ QtObject {
 
   function registerClickTarget() {}
   function unregisterClickTarget() {}
+  function run(command) {
+    runCount++
+    lastCommand = String(command)
+    return runResult
+  }
   function showTooltip() {}
   function hideTooltip() {}
   function requestPopout(owner) { activePopout = owner }

@@ -15,6 +15,7 @@ mkdir -p "$test_dir/plugin/bin" "$test_dir/fixtures" "$test_dir/Ui" "$test_dir/C
 cp "$repo_root/Service.qml" "$test_dir/plugin/Service.qml"
 cp "$repo_root/BarWidget.qml" "$test_dir/plugin/BarWidget.qml"
 cp "$repo_root/tests/qml/widget_preview.qml" "$test_dir/shell.qml"
+cp "$repo_root/tests/qml/widget_states_preview.qml" "$test_dir/states-shell.qml"
 cp "$repo_root/tests/qml/FakeBar.qml" "$test_dir/FakeBar.qml"
 cp "$repo_root/bin/system-stats-helper" "$test_dir/plugin/bin/system-stats-helper"
 cp -R "$repo_root/tests/fixtures/cpu" "$test_dir/fixtures/cpu"
@@ -31,7 +32,7 @@ SYSTEM_STATS_REVIEW_DIR="$review_dir" \
   SYSTEM_STATS_GPU_INVENTORY_FILE="$test_dir/fixtures/gpu/hybrid-unique-display.inventory" \
   SYSTEM_STATS_GPU_PRESENCE_FILE="$test_dir/fixtures/gpu/hybrid.presence" \
   SYSTEM_STATS_INTEL_PROC_FRAMES="$test_dir/fixtures/gpu/intel/i915" \
-  SYSTEM_STATS_INTERVAL_MS=250 \
+  SYSTEM_STATS_INTERVAL_MS=1000 \
   QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml"
 
@@ -42,3 +43,20 @@ magick "$review_dir/system-stats-gib.png" -resize 720x144\! "$review_dir/system-
 test -s "$review_dir/system-stats-initializing.png"
 test -s "$review_dir/system-stats-percent.png"
 test -s "$review_dir/system-stats-gib.png"
+
+states_output=$(SYSTEM_STATS_REVIEW_DIR="$review_dir" \
+  QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color --path "$test_dir/states-shell.qml" 2>&1) || {
+    printf '%s\n' "$states_output"
+    exit 1
+  }
+printf '%s\n' "$states_output"
+grep -Fq "TEST-PASS: degraded and failed states rendered; panel, theme, and contrast geometry checked" \
+  <<<"$states_output"
+
+magick "$review_dir/system-stats-partial-dark.png" -resize 720x144\! \
+  "$review_dir/system-stats-partial-dark.png"
+magick "$review_dir/system-stats-failed-light.png" -resize 720x144\! \
+  "$review_dir/system-stats-failed-light.png"
+test -s "$review_dir/system-stats-partial-dark.png"
+test -s "$review_dir/system-stats-failed-light.png"

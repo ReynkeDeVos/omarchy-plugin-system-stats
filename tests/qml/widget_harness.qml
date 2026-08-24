@@ -95,8 +95,8 @@ ShellRoot {
     if (!verify(screenA.cpuVisible && screenB.cpuVisible, "CPU metrics visible")) return
     if (!verify(screenA.ramVisible && screenB.ramVisible, "RAM metrics visible")) return
     if (!verify(screenA.gpuVisible && screenB.gpuVisible, "GPU metrics visible")) return
-    if (!verify(!screenA.gpuErrorVisible && !screenB.gpuErrorVisible,
-                "available GPU metrics have no error marker")) return
+    if (!verify(!screenA.gpuUnavailable && !screenB.gpuUnavailable,
+                "available GPU metrics have no unavailable state")) return
     if (!verify(screenA.displayValue === "37", "screen A CPU value")) return
     if (!verify(screenB.displayValue === "37", "screen B CPU value")) return
     if (!verify(screenA.ramDisplayFormat === "percent", "screen A default RAM format")) return
@@ -113,9 +113,9 @@ ShellRoot {
                 "detail panel names the measurement path")) return
     if (!verify(screenA.gpuEvidenceSummary() === "Fixture-tested",
                 "detail panel names the evidence status")) return
-    if (!verify(screenA.Accessible.name.indexOf("RAM 63 Prozent") !== -1,
+    if (!verify(screenA.Accessible.name.indexOf("RAM 63 percent") !== -1,
                 "RAM percentage is accessible")) return
-    if (!verify(screenA.Accessible.name.indexOf("GPU 40 Prozent") !== -1,
+    if (!verify(screenA.Accessible.name.indexOf("GPU 40 percent") !== -1,
                 "GPU percentage is accessible")) return
 
     screenAWidth = screenA.implicitWidth

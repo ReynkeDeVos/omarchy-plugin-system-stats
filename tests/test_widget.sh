@@ -126,8 +126,18 @@ error_output=$(SYSTEM_STATS_FRAMES="$test_dir/fixtures/cpu/widget.stat" \
     exit 1
   }
 printf '%s\n' "$error_output"
-grep -Fq "TEST-PASS: Intel GPU error is visible without hiding CPU or RAM" \
+grep -Fq "TEST-PASS: Intel GPU error is detailed without cluttering the bar" \
   <<<"$error_output"
+
+cp "$repo_root/tests/qml/widget_contract_harness.qml" "$test_dir/contract-shell.qml"
+contract_output=$(QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color --path "$test_dir/contract-shell.qml" 2>&1) || {
+    printf '%s\n' "$contract_output"
+    exit 1
+  }
+printf '%s\n' "$contract_output"
+grep -Fq "TEST-PASS: approved widget contract remains stable and operable" \
+  <<<"$contract_output"
 
 if rg -n '\b(Process|Timer)\s*\{' "$repo_root/BarWidget.qml"; then
   echo "screen callers must remain pure readers without helpers or sampling timers" >&2
