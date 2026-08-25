@@ -5,6 +5,7 @@ set -euo pipefail
 repo_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 plugin_id="reynkedevos.system-stats"
 compatibility_doc="$repo_root/docs/quattro-compatibility.md"
+live_gate="$repo_root/tests/accept_quattro_live.sh"
 
 jq -e '.barWidget.defaultSection == "right"' "$repo_root/manifest.json" >/dev/null
 
@@ -27,9 +28,12 @@ grep -Fq '## Limits on other versions' "$compatibility_doc"
 grep -Fq 'bash tests/accept_quattro_live.sh --real-suspend' "$compatibility_doc"
 grep -Fq "does not replace ADR-0001's separate" "$compatibility_doc"
 
-live_help=$(bash "$repo_root/tests/accept_quattro_live.sh" --help)
+live_help=$(bash "$live_gate" --help)
 grep -Fq 'Usage: tests/accept_quattro_live.sh [--real-suspend]' <<<"$live_help"
 grep -Fq 'restores the original shell configuration' <<<"$live_help"
+grep -Fq 'export OMARCHY_SHELL_IPC_TIMEOUT="${OMARCHY_SHELL_IPC_TIMEOUT:-10s}"' \
+  "$live_gate"
+grep -Fq 'hyprctl instances -j' "$live_gate"
 
 test ! -e "$repo_root/install.sh"
 jq -e 'has("install") | not' "$repo_root/manifest.json" >/dev/null

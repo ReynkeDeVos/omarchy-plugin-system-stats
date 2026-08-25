@@ -44,6 +44,30 @@ for command in cp git hyprctl jq make omarchy omarchy-shell pgrep quickshell; do
   command -v "$command" >/dev/null || fail "missing command: $command"
 done
 
+# A plugin rescan rebuilds live QML and can legitimately exceed the shell
+# wrapper's two-second default on the reference session.
+export OMARCHY_SHELL_IPC_TIMEOUT="${OMARCHY_SHELL_IPC_TIMEOUT:-10s}"
+
+# Long-lived tmux servers can predate Hyprland and omit its instance signature
+# from new panes. Discover the matching live instance without changing tmux.
+if [[ -z ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  hyprland_instances=$(hyprctl instances -j 2>/dev/null) ||
+    fail "could not discover the active Hyprland instance"
+  if [[ -n ${WAYLAND_DISPLAY:-} ]]; then
+    HYPRLAND_INSTANCE_SIGNATURE=$(jq -er --arg socket "$WAYLAND_DISPLAY" '
+      [.[] | select(.wl_socket == $socket)]
+      | if length == 1 then .[0].instance else empty end
+    ' <<<"$hyprland_instances") ||
+      fail "could not match WAYLAND_DISPLAY to one Hyprland instance"
+  else
+    HYPRLAND_INSTANCE_SIGNATURE=$(jq -er '
+      if length == 1 then .[0].instance else empty end
+    ' <<<"$hyprland_instances") ||
+      fail "could not select one active Hyprland instance"
+  fi
+  export HYPRLAND_INSTANCE_SIGNATURE
+fi
+
 [[ $(omarchy version) == "$target_omarchy_version" ]] ||
   fail "this gate targets Omarchy $target_omarchy_version"
 quickshell_version=$(quickshell --version 2>&1)
