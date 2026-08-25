@@ -318,6 +318,9 @@ real_suspend_cycle() {
   local started_at resumed_at elapsed
   started_at=$(date +%s)
   systemctl suspend
+  printf '%s: once the system has resumed and this terminal is usable, press Enter to continue.\n' \
+    "$label"
+  read -r
   resumed_at=$(date +%s)
   elapsed=$((resumed_at - started_at))
   (( elapsed >= minimum_seconds )) ||

@@ -34,6 +34,13 @@ grep -Fq 'restores the original shell configuration' <<<"$live_help"
 grep -Fq 'export OMARCHY_SHELL_IPC_TIMEOUT="${OMARCHY_SHELL_IPC_TIMEOUT:-10s}"' \
   "$live_gate"
 grep -Fq 'hyprctl instances -j' "$live_gate"
+suspend_line=$(grep -nF '  systemctl suspend' "$live_gate" | cut -d: -f1)
+resume_prompt_line=$(grep -nF 'once the system has resumed and this terminal is usable' \
+  "$live_gate" | cut -d: -f1)
+resumed_at_line=$(grep -nF '  resumed_at=$(date +%s)' "$live_gate" | cut -d: -f1)
+(( suspend_line < resume_prompt_line && resume_prompt_line < resumed_at_line ))
+sed -n "${resume_prompt_line},${resumed_at_line}p" "$live_gate" |
+  grep -Fxq '  read -r'
 
 test ! -e "$repo_root/install.sh"
 jq -e 'has("install") | not' "$repo_root/manifest.json" >/dev/null
