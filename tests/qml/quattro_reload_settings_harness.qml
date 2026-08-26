@@ -7,19 +7,10 @@ ShellRoot {
 
   property bool reloadResetChecked: false
 
-  readonly property var savedConfig: ({
-    bar: {
-      layout: {
-        left: [],
-        center: [],
-        right: [{
-          id: "reynkedevos.system-stats",
-          intervalSeconds: 3,
-          ramDisplayFormat: "gib",
-          gpuSelection: { mode: "auto", configRevision: 4 }
-        }]
-      }
-    }
+  readonly property var savedSettings: ({
+    intervalSeconds: 3,
+    ramDisplayFormat: "gib",
+    gpuSelection: { mode: "auto", configRevision: 4 }
   })
 
   function verify(condition, message) {
@@ -47,11 +38,17 @@ ShellRoot {
       reloadResetChecked = true
       screenA.settings = ({})
       screenB.settings = ({})
-      Qt.callLater(checkRestoredSettings)
+      Qt.callLater(reinjectSettings)
       return
     }
-    console.log("TEST-PASS: recreated widgets restore Quattro inline settings")
+    console.log("TEST-PASS: recreated widgets consume Quattro-injected settings")
     Qt.quit()
+  }
+
+  function reinjectSettings() {
+    screenA.settings = savedSettings
+    screenB.settings = savedSettings
+    Qt.callLater(checkRestoredSettings)
   }
 
   QtObject {
@@ -97,10 +94,6 @@ ShellRoot {
   Timer {
     interval: 0
     running: true
-    onTriggered: {
-      fakeBarA.persistedShellConfig = testRoot.savedConfig
-      fakeBarB.persistedShellConfig = testRoot.savedConfig
-      Qt.callLater(testRoot.checkRestoredSettings)
-    }
+    onTriggered: testRoot.reinjectSettings()
   }
 }

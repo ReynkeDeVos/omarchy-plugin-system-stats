@@ -95,14 +95,6 @@ ShellRoot {
     if (!verify(screenB.session === session, "screen B uses shared session")) return
     if (!verify(screenA.snapshotSequence === 1, "screen A sequence")) return
     if (!verify(screenB.snapshotSequence === 1, "screen B sequence")) return
-    var acceptance = JSON.parse(screenA.acceptanceState())
-    if (!verify(acceptance.widgetCount === 2, "acceptance state counts both screens")) return
-    if (!verify(acceptance.serviceCount === 1, "acceptance state counts one shared service")) return
-    if (!verify(acceptance.snapshotCount === 1,
-                "acceptance state counts one immutable snapshot")) return
-    if (!verify(acceptance.sharedSequence && acceptance.sharedSettings,
-                "acceptance state reports shared sequence and settings: "
-                  + JSON.stringify(acceptance))) return
     if (!verify(screenA.cpuVisible && screenB.cpuVisible, "CPU metrics visible")) return
     if (!verify(screenA.ramVisible && screenB.ramVisible, "RAM metrics visible")) return
     if (!verify(screenA.gpuVisible && screenB.gpuVisible, "GPU metrics visible")) return
@@ -152,13 +144,11 @@ ShellRoot {
   FakeBar {
     id: fakeBarA
     session: session
-    peerWidgets: [screenA, screenB]
   }
 
   FakeBar {
     id: fakeBarB
     session: session
-    peerWidgets: [screenA, screenB]
   }
 
   SystemStats.BarWidget {

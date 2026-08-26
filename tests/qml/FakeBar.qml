@@ -10,10 +10,7 @@ QtObject {
   property int runCount: 0
   property string lastCommand: ""
   property bool runResult: true
-  property var peerWidgets: []
-  property var persistedShellConfig: null
   readonly property QtObject shell: QtObject {
-    readonly property var shellConfig: root.persistedShellConfig
     readonly property QtObject pluginRegistry: QtObject {
       function setBarWidget(pluginId, key, value, selector) {
         if (pluginId !== "reynkedevos.system-stats"
@@ -45,7 +42,6 @@ QtObject {
 
   function registerClickTarget() {}
   function unregisterClickTarget() {}
-  function moduleWidgets() { return peerWidgets }
   function run(command) {
     runCount++
     lastCommand = String(command)

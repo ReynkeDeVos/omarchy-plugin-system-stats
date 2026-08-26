@@ -148,7 +148,7 @@ reload_settings_output=$(QT_QPA_PLATFORM=offscreen \
     exit 1
   }
 printf '%s\n' "$reload_settings_output"
-grep -Fq "TEST-PASS: recreated widgets restore Quattro inline settings" \
+grep -Fq "TEST-PASS: recreated widgets consume Quattro-injected settings" \
   <<<"$reload_settings_output"
 
 if rg -n '\b(Process|Timer)\s*\{' "$repo_root/BarWidget.qml"; then

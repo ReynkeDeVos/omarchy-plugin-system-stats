@@ -133,46 +133,6 @@ BarWidget {
     return bar && bar.shell ? bar.shell.pluginRegistry : null
   }
 
-  function inlineSettingsFromShellConfig() {
-    var config = bar && bar.shell ? bar.shell.shellConfig : null
-    var layout = config && config.bar ? config.bar.layout : null
-    if (!layout || typeof layout !== "object") return null
-
-    var sections = ["left", "center", "right"]
-    for (var sectionIndex = 0; sectionIndex < sections.length; sectionIndex++) {
-      var entries = layout[sections[sectionIndex]]
-      if (!Array.isArray(entries)) continue
-      for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
-        var entry = entries[entryIndex]
-        if (!entry || typeof entry !== "object" || Array.isArray(entry)
-            || String(entry.id || "") !== moduleName) continue
-        var restored = {}
-        var keys = Object.keys(entry)
-        for (var keyIndex = 0; keyIndex < keys.length; keyIndex++) {
-          var key = keys[keyIndex]
-          if (key !== "id") restored[key] = entry[key]
-        }
-        return restored
-      }
-    }
-    return null
-  }
-
-  // Quattro can recreate a plugin widget before its slot re-injects settings.
-  // Recover the authoritative inline entry so a hot reload cannot fall back to
-  // defaults while shell.json still contains the user's choices.
-  function restoreInlineSettings() {
-    var restored = inlineSettingsFromShellConfig()
-    if (restored === null) return false
-    if (JSON.stringify(settings || {}) !== JSON.stringify(restored)) settings = restored
-    return true
-  }
-
-  function reconcileSettings() {
-    restoreInlineSettings()
-    synchronizeSettingOverrides()
-  }
-
   function persistSetting(key, value, failureLabel) {
     var registry = settingRegistry()
     if (!registry || typeof registry.setBarWidget !== "function") {
@@ -506,63 +466,6 @@ BarWidget {
       : "System Stats. No system metrics are available"
   }
 
-  function acceptanceState() {
-    var widgets = bar && typeof bar.moduleWidgets === "function"
-      ? bar.moduleWidgets(moduleName) : [root]
-    var services = []
-    var snapshots = []
-    var widgetStates = []
-    var firstGeneration = -1
-    var firstSequence = -1
-    var firstSettings = ""
-    var sharedSequence = true
-    var sharedSettings = true
-
-    for (var i = 0; i < widgets.length; i++) {
-      var widget = widgets[i]
-      if (!widget) continue
-      if (widget.session && services.indexOf(widget.session) === -1)
-        services.push(widget.session)
-      if (widget.snapshot && snapshots.indexOf(widget.snapshot) === -1)
-        snapshots.push(widget.snapshot)
-
-      var generation = widget.snapshot ? Number(widget.snapshot.generation) : 0
-      var sequence = Number(widget.snapshotSequence)
-      var persistedSettings = {
-        intervalSeconds: widget.configuredIntervalSeconds(),
-        ramDisplayFormat: widget.ramDisplayFormat,
-        gpuSelection: widget.storedGpuSelection()
-      }
-      var settingsKey = JSON.stringify(persistedSettings)
-      if (widgetStates.length === 0) {
-        firstGeneration = generation
-        firstSequence = sequence
-        firstSettings = settingsKey
-      } else {
-        if (generation !== firstGeneration || sequence !== firstSequence)
-          sharedSequence = false
-        if (settingsKey !== firstSettings) sharedSettings = false
-      }
-      widgetStates.push({
-        generation: generation,
-        sequence: sequence,
-        settings: persistedSettings
-      })
-    }
-
-    return JSON.stringify({
-      schemaVersion: 1,
-      widgetCount: widgetStates.length,
-      serviceCount: services.length,
-      snapshotCount: snapshots.length,
-      generation: firstGeneration,
-      sequence: firstSequence,
-      sharedSequence: sharedSequence,
-      sharedSettings: sharedSettings,
-      widgets: widgetStates
-    })
-  }
-
   implicitWidth: content.implicitWidth + ramWidthReserve + Style.space(10)
   implicitHeight: barSize
 
@@ -575,13 +478,7 @@ BarWidget {
   Keys.onEnterPressed: root.toggle()
   Keys.onSpacePressed: root.toggle()
 
-  onBarChanged: Qt.callLater(restoreInlineSettings)
-  onSettingsChanged: Qt.callLater(reconcileSettings)
-
-  Connections {
-    target: root.bar ? root.bar.shell : null
-    function onShellConfigChanged() { Qt.callLater(root.restoreInlineSettings) }
-  }
+  onSettingsChanged: Qt.callLater(synchronizeSettingOverrides)
 
   Connections {
     target: root.session
@@ -1303,8 +1200,5 @@ BarWidget {
     }
   }
 
-  Component.onCompleted: Qt.callLater(function() {
-    root.restoreInlineSettings()
-    root.configurePersistedSelection()
-  })
+  Component.onCompleted: Qt.callLater(configurePersistedSelection)
 }
