@@ -762,14 +762,18 @@ if grep -Fq -- "--section tray" "$repo_root/README.md"; then
   exit 1
 fi
 
-grep -Fq 'Acceptance target: **Omarchy 4.0.1-1**' "$compatibility_doc"
+grep -Fq 'Acceptance target: **Omarchy 4.0.2-1**' "$compatibility_doc"
 grep -Fq 'Quickshell 0.3.1 (Arch Linux package; revision field empty).' \
   "$compatibility_doc"
-grep -Fq 'target_omarchy_version="4.0.1-1"' "$live_gate"
+grep -Fq 'target_omarchy_version="4.0.2-1"' "$live_gate"
 grep -Fq 'target_quickshell_fingerprint="Quickshell 0.3.1 (revision , distributed by Arch Linux)"' \
   "$live_gate"
 grep -Fq '[[ $quickshell_version == "$target_quickshell_fingerprint" ]]' \
   "$live_gate"
+if rg -n '4\.0\.1-1' "$live_gate" "$compatibility_doc"; then
+  echo "the retargeted gate must not retain the old Omarchy package release" >&2
+  exit 1
+fi
 if rg -n 'target_quickshell_revision|28771c7c74b42e20afca0b1b63980cb46515537c' \
     "$live_gate" "$compatibility_doc"; then
   echo "the retargeted gate must not retain the old Quickshell revision" >&2

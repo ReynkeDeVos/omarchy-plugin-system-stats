@@ -1,6 +1,6 @@
 # Quattro compatibility
 
-Acceptance target: **Omarchy 4.0.1-1**, using manifest schema 1 and
+Acceptance target: **Omarchy 4.0.2-1**, using manifest schema 1 and
 Quickshell 0.3.1 (Arch Linux package; revision field empty).
 The gate pins the complete local `quickshell --version` fingerprint,
 `Quickshell 0.3.1 (revision , distributed by Arch Linux)`, because this package

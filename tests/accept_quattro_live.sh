@@ -60,7 +60,7 @@ suspend_barrier="$repo_root/tests/helpers/run_quattro_suspend_if_ready.sh"
 acceptance_cleanup="$repo_root/tests/helpers/cleanup_quattro_acceptance.sh"
 session_unlock_verifier="$repo_root/tests/helpers/verify_quattro_session_unlocked.sh"
 hyprland_instance_resolver="$repo_root/tests/helpers/resolve_quattro_hyprland_instance.sh"
-target_omarchy_version="4.0.1-1"
+target_omarchy_version="4.0.2-1"
 target_quickshell_fingerprint="Quickshell 0.3.1 (revision , distributed by Arch Linux)"
 
 fail() {
