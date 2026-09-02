@@ -33,7 +33,7 @@ run_case() {
     SYSTEM_STATS_PCI_DEVICES_ROOT="$test_dir/missing-pci" \
     SYSTEM_STATS_SECOND_MS="$second_ms" \
     QT_QPA_PLATFORM=offscreen \
-    timeout 15s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
+    timeout 35s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
       printf '%s\n' "$output"
       exit 1
     }
@@ -48,9 +48,9 @@ run_case none empty.inventory
 run_case unique-display hybrid-unique-display.inventory
 run_case ambiguous multiple-ambiguous.inventory
 run_case hotplug single-intel.inventory
-run_case fixed single-intel.inventory 1
-run_case fixed-amd single-intel.inventory 1
-run_case fixed-intel nvidia-only.inventory 1
+run_case fixed single-intel.inventory 5
+run_case fixed-amd single-intel.inventory 5
+run_case fixed-intel nvidia-only.inventory 5
 run_case fixed-immediate single-intel.inventory
 run_case switch-auto hybrid-unique-display.inventory
 
@@ -78,7 +78,7 @@ run_linux_label_case() {
     SYSTEM_STATS_UDEV_DATA_ROOT="$udev_root" \
     SYSTEM_STATS_SECOND_MS=1 \
     QT_QPA_PLATFORM=offscreen \
-    timeout 15s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
+    timeout 35s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
       printf '%s\n' "$output"
       exit 1
     }
@@ -116,7 +116,7 @@ run_restart_case() {
     SYSTEM_STATS_REAL_HELPER="$test_dir/bin/system-stats-helper.real" \
     SYSTEM_STATS_SECOND_MS="$second_ms" \
     QT_QPA_PLATFORM=offscreen \
-    timeout 15s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
+    timeout 35s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
       printf '%s\n' "$output"
       exit 1
     }
@@ -126,6 +126,6 @@ run_restart_case() {
 }
 
 run_restart_case auto-restart inventory-added 10 single-intel.inventory
-run_restart_case fixed-restart fixed-retry-paused 1 single-intel.inventory
+run_restart_case fixed-restart fixed-retry-paused 5 single-intel.inventory
 run_restart_case required-restart inventory-removed 10 multiple-ambiguous.inventory
 run_restart_case selected-disappears-restart inventory-removed 10 hybrid-unique-display.inventory

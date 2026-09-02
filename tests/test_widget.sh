@@ -139,6 +139,18 @@ printf '%s\n' "$contract_output"
 grep -Fq "TEST-PASS: approved widget contract remains stable and operable" \
   <<<"$contract_output"
 
+cp "$repo_root/tests/qml/quattro_reload_settings_harness.qml" \
+  "$test_dir/reload-settings-shell.qml"
+reload_settings_output=$(QT_QPA_PLATFORM=offscreen \
+  timeout 5s quickshell --no-color \
+  --path "$test_dir/reload-settings-shell.qml" 2>&1) || {
+    printf '%s\n' "$reload_settings_output"
+    exit 1
+  }
+printf '%s\n' "$reload_settings_output"
+grep -Fq "TEST-PASS: recreated widgets consume Quattro-injected settings" \
+  <<<"$reload_settings_output"
+
 if rg -n '\b(Process|Timer)\s*\{' "$repo_root/BarWidget.qml"; then
   echo "screen callers must remain pure readers without helpers or sampling timers" >&2
   exit 1

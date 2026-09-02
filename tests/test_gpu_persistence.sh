@@ -26,7 +26,7 @@ cut -f1 "$inventory_file" >"$presence_file"
 
 output=$(SYSTEM_STATS_GPU_INVENTORY_FILE="$inventory_file" \
   SYSTEM_STATS_GPU_PRESENCE_FILE="$presence_file" \
-  SYSTEM_STATS_SECOND_MS=5 \
+  SYSTEM_STATS_SECOND_MS=100 \
   QT_QPA_PLATFORM=offscreen \
   timeout 5s quickshell --no-color --path "$test_dir/shell.qml" 2>&1) || {
     printf '%s\n' "$output"

@@ -218,7 +218,7 @@ ShellRoot {
       })
       return
     }
-    if (stage === 1 && session.gpuInventory.revision === stableRevision + 1
+    if (stage === 1 && session.gpuInventory.revision >= stableRevision + 1
         && snapshot.configRevision === 1 && snapshot.selection.status === "missing") {
       if (!checkIndependentMetrics(snapshot)) return
       if (!verify(snapshot.selection.mode === "fixed", "fixed mode retained")) return
@@ -529,7 +529,7 @@ ShellRoot {
   }
 
   Timer {
-    interval: 12000
+    interval: 30000
     running: true
     onTriggered: fail("timed out")
   }

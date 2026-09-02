@@ -7,6 +7,7 @@ ShellRoot {
 
   property bool finished: false
   property bool ready: false
+  property bool initialWidgetsChecked: false
   property real screenAWidth: 0
   property real screenBWidth: 0
   property int inventoryRevisionBeforeOpen: 0
@@ -57,6 +58,7 @@ ShellRoot {
   }
 
   function checkPersistedSelection(snapshot) {
+    if (ready) return
     if (snapshot.selection.mode !== "fixed" || snapshot.selection.status !== "selected") return
     if (!verify(snapshot.selection.stableId === fixedGpuId, "picker configures fixed identity")) return
     if (!verify(fakeBarA.persistenceCount === 1, "picker writes through Omarchy settings once")) return
@@ -84,7 +86,8 @@ ShellRoot {
   }
 
   function checkWidgets(snapshot) {
-    if (finished || ready || snapshot.sequence !== 1) return
+    if (finished || ready || initialWidgetsChecked || snapshot.sequence !== 1) return
+    initialWidgetsChecked = true
     if (!verify(fakeBarA !== fakeBarB, "screens have distinct bar callers")) return
     if (!verify(screenA.bar === fakeBarA, "screen A owns bar A")) return
     if (!verify(screenB.bar === fakeBarB, "screen B owns bar B")) return
